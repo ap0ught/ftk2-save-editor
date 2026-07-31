@@ -20,6 +20,8 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QPushButton,
+    QSpinBox,
     QSplitter,
     QStatusBar,
     QTabWidget,
@@ -33,12 +35,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ftk2_editor import FTK2_GAME_DIR, decrypt_ftk2_bytes
+from ftk2_editor import FTK2_GAME_DIR, backup, decrypt_ftk2_bytes, set_character_gold
 from ftk2_editor.viewmodel import list_save_candidates, load_save_view
 
 APP_TITLE = "FTK2 Save Reader"
 MAX_TREE_CHILDREN = 200
 MAX_TREE_DEPTH = 6
+GOLD_PRESETS = (0, 100, 500, 1_000, 5_000, 9_999, 99_999)
 
 
 class LoadWorker(QThread):
@@ -155,7 +158,45 @@ class MainWindow(QMainWindow):
         self.party_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.party_table.horizontalHeader().setStretchLastSection(True)
         self.party_table.itemSelectionChanged.connect(self._on_party_select)
-        self.tabs.addTab(self.party_table, "Party")
+
+        party_wrap = QWidget()
+        party_layout = QVBoxLayout(party_wrap)
+        party_layout.setContentsMargins(0, 0, 0, 0)
+        party_layout.addWidget(self.party_table)
+
+        edit_row = QHBoxLayout()
+        edit_row.addWidget(QLabel("Selected gold"))
+        self.gold_spin = QSpinBox()
+        self.gold_spin.setRange(0, 999_999_999)
+        self.gold_spin.setSingleStep(100)
+        self.gold_spin.setEnabled(False)
+        edit_row.addWidget(self.gold_spin)
+
+        self._gold_preset_buttons: list[QPushButton] = []
+        for amount in GOLD_PRESETS:
+            label = f"{amount:,}"
+            btn = QPushButton(label)
+            btn.setEnabled(False)
+            btn.setToolTip(f"Set gold field to {amount:,}")
+            btn.clicked.connect(lambda _checked=False, value=amount: self.gold_spin.setValue(value))
+            self._gold_preset_buttons.append(btn)
+            edit_row.addWidget(btn)
+
+        self.apply_gold_btn = QPushButton("Apply & save to file")
+        self.apply_gold_btn.setEnabled(False)
+        self.apply_gold_btn.clicked.connect(self.apply_selected_gold)
+        edit_row.addWidget(self.apply_gold_btn)
+        self.apply_all_gold_btn = QPushButton("Apply to all party")
+        self.apply_all_gold_btn.setEnabled(False)
+        self.apply_all_gold_btn.setToolTip("Set every party member’s wallet to the selected gold amount")
+        self.apply_all_gold_btn.clicked.connect(self.apply_gold_to_all_party)
+        edit_row.addWidget(self.apply_all_gold_btn)
+        edit_row.addStretch(1)
+        self.gold_hint = QLabel("Open a GameRuns/*.ftk2 save, select a character, set gold.")
+        self.gold_hint.setStyleSheet("color: #9aa3ad;")
+        edit_row.addWidget(self.gold_hint)
+        party_layout.addLayout(edit_row)
+        self.tabs.addTab(party_wrap, "Party")
 
         inv_wrap = QWidget()
         inv_layout = QVBoxLayout(inv_wrap)
@@ -209,6 +250,10 @@ class MainWindow(QMainWindow):
             QStatusBar { background: #12151a; color: #9aa3ad; }
             QMenuBar { background: #15181d; color: #e8eaed; }
             QMenu { background: #1c1f24; color: #e8eaed; }
+            QPushButton, QSpinBox {
+                background: #2f3640; color: #e8eaed; border: 1px solid #3d4654; padding: 4px 10px;
+            }
+            QPushButton:disabled, QSpinBox:disabled { color: #6b7280; }
             """
         )
 
@@ -374,14 +419,123 @@ class MainWindow(QMainWindow):
             for col, value in enumerate(values):
                 self.party_table.setItem(row_idx, col, QTableWidgetItem("" if value is None else str(value)))
 
+    def _set_gold_controls_enabled(self, enabled: bool) -> None:
+        self.gold_spin.setEnabled(enabled)
+        self.apply_gold_btn.setEnabled(enabled)
+        self.apply_all_gold_btn.setEnabled(enabled)
+        for btn in self._gold_preset_buttons:
+            btn.setEnabled(enabled)
+
     def _on_party_select(self) -> None:
         rows = self.party_table.selectionModel().selectedRows()
         if not rows:
+            self._set_gold_controls_enabled(False)
             return
         idx = rows[0].row()
         if 0 <= idx < len(self._party_rows):
-            self._populate_inventory(self._party_rows[idx])
-            self.tabs.setCurrentIndex(2)
+            row = self._party_rows[idx]
+            self._populate_inventory(row)
+            # Stay on Party tab so gold controls remain visible.
+            can_edit = (
+                self._view is not None
+                and self._view.get("kind") == "run"
+                and bool(row.get("guid"))
+            )
+            self._set_gold_controls_enabled(can_edit)
+            if row.get("gold") is not None:
+                self.gold_spin.setValue(int(row["gold"]))
+            else:
+                self.gold_spin.setValue(0)
+            if can_edit:
+                self.gold_hint.setText(f"Editing {row.get('name')} wallet (CURRENCY_ADVENTURE)")
+            else:
+                self.gold_hint.setText("Gold editing requires a GameRuns/*.ftk2 file.")
+
+    def apply_selected_gold(self) -> None:
+        if not self._path or not self._view or self._view.get("kind") != "run":
+            QMessageBox.warning(
+                self,
+                APP_TITLE,
+                "Open a GameRuns/*.ftk2 expedition save to edit wallet gold.\n"
+                "User.ftk2 only has lifetime GOLD_* stats, not party wallets.",
+            )
+            return
+        rows = self.party_table.selectionModel().selectedRows()
+        if not rows:
+            QMessageBox.information(self, APP_TITLE, "Select a party member first.")
+            return
+        row = self._party_rows[rows[0].row()]
+        guid = row.get("guid")
+        if not guid:
+            QMessageBox.warning(self, APP_TITLE, "Selected character has no Guid.")
+            return
+        gold = int(self.gold_spin.value())
+        reply = QMessageBox.question(
+            self,
+            APP_TITLE,
+            f"Set {row.get('name')}'s gold to {gold:,}?\n\n"
+            f"File: {self._path}\n"
+            "A .bak backup will be created. Quit the game first if it is running.",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            bak = backup(self._path)
+            data = self._path.read_bytes()
+            modified, ok = set_character_gold(data, str(guid), gold)
+            if not ok:
+                QMessageBox.critical(self, APP_TITLE, "Could not find that character in the run.")
+                return
+            self._path.write_bytes(modified)
+            self.statusBar().showMessage(
+                f"Saved {row.get('name')} gold={gold:,} (backup {bak.name})"
+            )
+            self.load_path(self._path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, APP_TITLE, f"Save failed:\n{exc}")
+
+    def apply_gold_to_all_party(self) -> None:
+        if not self._path or not self._view or self._view.get("kind") != "run":
+            QMessageBox.warning(
+                self,
+                APP_TITLE,
+                "Open a GameRuns/*.ftk2 expedition save to edit wallet gold.",
+            )
+            return
+        targets = [row for row in self._party_rows if row.get("guid")]
+        if not targets:
+            QMessageBox.information(self, APP_TITLE, "No party characters with Guids found.")
+            return
+        gold = int(self.gold_spin.value())
+        names = ", ".join(str(row.get("name")) for row in targets)
+        reply = QMessageBox.question(
+            self,
+            APP_TITLE,
+            f"Set gold to {gold:,} for all party members?\n\n{names}\n\n"
+            f"File: {self._path}\n"
+            "A .bak backup will be created. Quit the game first if it is running.",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            bak = backup(self._path)
+            data = self._path.read_bytes()
+            for row in targets:
+                data, ok = set_character_gold(data, str(row["guid"]), gold)
+                if not ok:
+                    QMessageBox.critical(
+                        self,
+                        APP_TITLE,
+                        f"Could not update {row.get('name')}.",
+                    )
+                    return
+            self._path.write_bytes(data)
+            self.statusBar().showMessage(
+                f"Saved gold={gold:,} for {len(targets)} characters (backup {bak.name})"
+            )
+            self.load_path(self._path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, APP_TITLE, f"Save failed:\n{exc}")
 
     def _populate_inventory(self, row: dict[str, Any] | None) -> None:
         self.inventory_table.setRowCount(0)

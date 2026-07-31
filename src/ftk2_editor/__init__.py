@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -234,6 +235,106 @@ def edit_field(data: bytes, field_name: str, new_value: str) -> tuple[bytes, boo
             text += "\n"
 
     return encrypt_ftk2_text(text), True
+
+
+def _split_gamerun_plain(plain: str) -> tuple[str, str, str] | None:
+    """Return (summary_json_text, body_json_text, joiner) for a GameRun plaintext."""
+    stripped = plain.lstrip()
+    if not stripped.startswith("//**"):
+        return None
+    # Preserve any leading whitespace from original plain (usually none)
+    start = plain.find("//**")
+    end = plain.find("**//", start)
+    if end < 0:
+        return None
+    summary = plain[start + 4 : end]
+    rest = plain[end + 4 :]
+    if rest.startswith("\r\n"):
+        joiner = "\r\n"
+        body = rest[2:]
+    elif rest.startswith("\n"):
+        joiner = "\n"
+        body = rest[1:]
+    else:
+        joiner = "\n"
+        body = rest
+    return summary, body, joiner
+
+
+def _dump_json_matching_newlines(obj: Any, sample_text: str) -> str:
+    """Serialize JSON using CRLF if *sample_text* uses CRLF."""
+    text = json.dumps(obj, indent=2, ensure_ascii=False)
+    if "\r\n" in sample_text:
+        text = text.replace("\n", "\r\n")
+        if sample_text.endswith("\r\n") and not text.endswith("\r\n"):
+            text += "\r\n"
+    elif sample_text.endswith("\n") and not text.endswith("\n"):
+        text += "\n"
+    return text
+
+
+def set_character_gold(
+    data: bytes,
+    character_guid: str,
+    gold: int,
+    *,
+    currency: str = "CURRENCY_ADVENTURE",
+) -> tuple[bytes, bool]:
+    """Set a run character's wallet gold (``CURRENCY_ADVENTURE`` stack) and re-encrypt.
+
+    Only works on GameRun ``.ftk2`` files (``//**summary**//`` + ``GameRunData``).
+    """
+    if gold < 0:
+        raise ValueError("gold must be >= 0")
+    plain = decrypt_ftk2_bytes(data)
+    parts = _split_gamerun_plain(plain)
+    if parts is None:
+        return data, False
+    summary_text, body_text, joiner = parts
+    try:
+        run = json.loads(body_text)
+    except json.JSONDecodeError:
+        return data, False
+
+    entities = run.get("Entities")
+    if not isinstance(entities, list):
+        return data, False
+
+    found = False
+    for entity in entities:
+        if entity.get("Guid") != character_guid:
+            continue
+        comps = entity.setdefault("Components", {})
+        cc = comps.setdefault("CharacterComponent", {})
+        things = cc.setdefault("Things", [])
+        if not isinstance(things, list):
+            return data, False
+        for thing in things:
+            if isinstance(thing, dict) and thing.get("ConfigName") == currency:
+                thing["_stackCount"] = int(gold)
+                thing.setdefault("Type", "ITEM")
+                found = True
+                break
+        if not found:
+            things.append(
+                {
+                    "Id": str(uuid.uuid4()),
+                    "ConfigName": currency,
+                    "Type": "ITEM",
+                    "_stackCount": int(gold),
+                    "Expansion": "BASE",
+                }
+            )
+            found = True
+        break
+
+    if not found:
+        return data, False
+
+    new_body = _dump_json_matching_newlines(run, body_text)
+    # Keep summary bytes unchanged when possible (avoid reformatting)
+    new_plain = f"//**{summary_text}**//{joiner}{new_body}"
+    return encrypt_ftk2_text(new_plain), True
 
 
 def set_local_stat(data: bytes, stat_name: str, value: int) -> tuple[bytes, bool]:

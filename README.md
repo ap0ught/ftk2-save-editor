@@ -1,9 +1,6 @@
 # ftk2-save-editor
 
-Save **viewer / editor** for **For The King II** (Steam appid 1676840) on Linux / Proton.
-
-Built by decompiling `FTK2.dll` → finding XOR key `21398xa2` in `SaveGameHelper` →
-treating `.ftk2` as obfuscated JSON. Full story: [`decompiled/HOWTO.md`](decompiled/HOWTO.md).
+Save editor for **For The King II** (Steam appid 1676840) on Linux / Proton.
 
 ## Format (confirmed via FTK2.dll decompile)
 
@@ -11,7 +8,7 @@ treating `.ftk2` as obfuscated JSON. Full story: [`decompiled/HOWTO.md`](decompi
 
 - Key: `21398xa2` (`SaveGameHelper.encryptString`)
 - Payload: indented `System.Text.Json` for `UserData` / `GameRunData`
-- Details: [`decompiled/FORMAT.md`](decompiled/FORMAT.md) · process: [`decompiled/HOWTO.md`](decompiled/HOWTO.md)
+- Details: [`decompiled/FORMAT.md`](decompiled/FORMAT.md)
 
 ### Gold
 
@@ -49,8 +46,11 @@ Browse `User.ftk2` and `GameRuns/*.ftk2`: overview, party wallets (`CURRENCY_ADV
 ## CLI
 
 ```bash
-# Summary of User.ftk2
+# Summary of User.ftk2 (backup by default)
 ftk2-edit --info
+
+# Skip backup (be careful)
+ftk2-edit --no-backup --set LocalStats.SOME_STAT=999
 
 # Decrypt to editable JSON
 ftk2-edit --decrypt /tmp/User.json
@@ -58,8 +58,8 @@ ftk2-edit --decrypt /tmp/User.json
 # Re-encrypt after editing
 ftk2-edit --encrypt-from /tmp/User.json --output /tmp/User.ftk2
 
-# Patch a LocalStats value (re-encrypts in place; use --backup)
-ftk2-edit --backup --set LocalStats.SOME_STAT=999
+# Write to a different file instead of overwriting
+ftk2-edit --output /tmp/Patched.ftk2 --set LocalStats.SOME_STAT=999
 
 # Verify decrypt works
 ftk2-edit --verify-only
@@ -67,12 +67,13 @@ ftk2-edit --verify-only
 
 ## Warnings
 
-- Edit a **copy**, or always use `--backup`
+- Edit a copy, or use `--output` to write elsewhere
+- `--no-backup` skips the default backup; use with caution
 - Quit the game first — it overwrites `User.ftk2` on exit
 - Steam Cloud may overwrite local edits
 - `GameRuns/*.ftk2` are large expedition states; prefer editing `User.ftk2` unless you know the schema
 
 ## Decompiled sources
 
-`decompiled/*.cs` are ILSpy output from `FTK2.dll` (research only).  
+`decompiled/*.cs` are ILSpy output from `FTK2.dll` (research only).
 Local decompiler SDK lives under `.tools/` (gitignored).

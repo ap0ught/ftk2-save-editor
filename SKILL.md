@@ -61,7 +61,8 @@ ftk2-gui   # desktop reader (party gold, inventory, stats, JSON)
 ftk2-edit --info
 ftk2-edit --decrypt /tmp/User.json
 ftk2-edit --encrypt-from /tmp/User.json --output /tmp/User.ftk2
-ftk2-edit --backup --set LocalStats.TOTAL_LORE=500
+ftk2-edit --set LocalStats.TOTAL_LORE=500
+ftk2-edit --no-backup --set LocalStats.SOME_STAT=999
 ftk2-edit --verify-only
 
 # Expedition wallet: decrypt a GameRuns/*.ftk2 and edit CURRENCY_ADVENTURE._stackCount
@@ -71,8 +72,8 @@ ftk2-edit GameRuns/<uuid>.ftk2 --decrypt /tmp/run.txt
 
 ## Caveats
 
-- Always backup; quit the game before replacing live saves
-- Steam Cloud can overwrite local files
+- Quit the game before editing; it overwrites `User.ftk2` on exit
+- Steam Cloud can overwrite local edits
 - Editing gold requires the **GameRun** file, not only `User.ftk2`
 - `GameRunData.Entities` lists are very large — prefer targeted edits
 

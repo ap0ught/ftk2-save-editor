@@ -50,9 +50,9 @@ def main() -> None:
         help="Set a top-level JSON field or LocalStats.NAME (e.g. --set LocalStats.LANG_ID=1)",
     )
     parser.add_argument(
-        "--backup",
+        "--no-backup",
         action="store_true",
-        help="Create a .bak backup before edits",
+        help="Skip creating a .bak backup before edits (default: backup)",
     )
     parser.add_argument(
         "--verify-only",
@@ -79,7 +79,7 @@ def main() -> None:
         if not text.lstrip().startswith("//**"):
             json.loads(text)
         out = Path(args.output) if args.output else save_path
-        if args.backup and out.exists():
+        if not args.no_backup and out.exists():
             print(f"Backup created: {backup(out)}")
         out.write_bytes(encrypt_ftk2_text(text))
         print(f"Encrypted {src} -> {out}")
@@ -124,7 +124,7 @@ def main() -> None:
         if not args.updates:
             sys.exit(0)
 
-    if args.backup:
+    if not args.no_backup:
         print(f"Backup created: {backup(save_path)}")
 
     modified = data
@@ -141,8 +141,8 @@ def main() -> None:
             sys.exit(1)
 
     output_path = Path(args.output) if args.output else save_path
-    if not args.backup and output_path == save_path:
-        print("\nWARNING: Overwriting live save file. Prefer --backup.", file=sys.stderr)
+    if not args.no_backup and output_path == save_path:
+        print("\nWARNING: Overwriting live save file. Prefer letting --no-backup be off, or use --output.", file=sys.stderr)
     output_path.write_bytes(modified)
     print(f"  Written to: {output_path}")
 
