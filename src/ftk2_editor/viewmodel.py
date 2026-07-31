@@ -1,0 +1,270 @@
+"""Helpers for presenting FTK2 save contents in the CLI / GUI."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from ftk2_editor import GAME_RUNS_DIR, USER_SAVE, parse_ftk2
+
+CURRENCY_ADVENTURE = "CURRENCY_ADVENTURE"
+CURRENCY_LORE = "CURRENCY_LORE"
+THING_XP = "XP"
+
+
+def thing_count(things: list[dict[str, Any]] | None, config_name: str) -> int | None:
+    """Return ``_stackCount`` for the first Thing with ``ConfigName``."""
+    if not things:
+        return None
+    for thing in things:
+        if thing.get("ConfigName") == config_name:
+            value = thing.get("_stackCount")
+            return int(value) if value is not None else 0
+    return None
+
+
+def character_from_entity(entity: dict[str, Any]) -> dict[str, Any] | None:
+    """Build a party-row dict from a run/user ``Entity``, or None if not a character."""
+    comps = entity.get("Components") or {}
+    cc = comps.get("CharacterComponent")
+    if not isinstance(cc, dict):
+        return None
+    name = cc.get("DisplayName")
+    config = cc.get("ConfigName")
+    if not name and not config:
+        return None
+
+    things = cc.get("Things") or []
+    equipped = cc.get("Equipped") or {}
+    inventory = [
+        {
+            "config": t.get("ConfigName"),
+            "type": t.get("Type"),
+            "count": t.get("_stackCount"),
+            "id": t.get("Id"),
+        }
+        for t in things
+        if isinstance(t, dict)
+    ]
+    inventory.sort(key=lambda row: (str(row.get("type") or ""), str(row.get("config") or "")))
+
+    return {
+        "guid": entity.get("Guid"),
+        "name": name or config or "?",
+        "class": config or "",
+        "character_type": cc.get("CharacterType"),
+        "health": cc.get("CurrentHealth"),
+        "focus": cc.get("CurrentFocus"),
+        "gold": thing_count(things, CURRENCY_ADVENTURE),
+        "xp": thing_count(things, THING_XP),
+        "extra_lives": cc.get("ExtraLives"),
+        "state": cc.get("State"),
+        "map_id": (comps.get("AdventureComponent") or {}).get("MapID"),
+        "equipped": dict(equipped) if isinstance(equipped, dict) else {},
+        "inventory": inventory,
+    }
+
+
+def party_from_entities(
+    entities: list[dict[str, Any]],
+    *,
+    guids: set[str] | None = None,
+    standard_only: bool = True,
+) -> list[dict[str, Any]]:
+    """Extract unique party-like characters from an Entities list."""
+    rows: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    for entity in entities:
+        if guids is not None and entity.get("Guid") not in guids:
+            continue
+        row = character_from_entity(entity)
+        if row is None:
+            continue
+        if standard_only:
+            ctype = row.get("character_type")
+            # User snapshots may omit CharacterType; run players use STANDARD.
+            if ctype is not None and ctype != "STANDARD":
+                continue
+        key = row["name"]
+        if key in seen_names:
+            continue
+        seen_names.add(key)
+        rows.append(row)
+    return rows
+
+
+def party_from_user(user: dict[str, Any]) -> list[dict[str, Any]]:
+    """Party snapshot from ``UserData.PartyCharacters`` (usually no wallet gold)."""
+    entities = user.get("PartyCharacters") or []
+    if not isinstance(entities, list):
+        return []
+    # Prefer matching guids so we keep order; allow missing CharacterType.
+    rows: list[dict[str, Any]] = []
+    for entity in entities:
+        row = character_from_entity(entity)
+        if row:
+            rows.append(row)
+    return rows
+
+
+def party_from_run(
+    run: dict[str, Any],
+    *,
+    preferred_guids: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Party wallets from ``GameRunData.Entities``."""
+    entities = run.get("Entities") or []
+    if not isinstance(entities, list):
+        return []
+    if preferred_guids:
+        guid_set = set(preferred_guids)
+        matched = party_from_entities(entities, guids=guid_set, standard_only=False)
+        if matched:
+            # Preserve preferred order
+            by_guid = {row["guid"]: row for row in matched}
+            ordered = [by_guid[g] for g in preferred_guids if g in by_guid]
+            extras = [row for row in matched if row["guid"] not in set(preferred_guids)]
+            return ordered + extras
+    return party_from_entities(entities, standard_only=True)
+
+
+def interesting_stats(stats: dict[str, Any] | None, *, limit: int = 80) -> list[tuple[str, Any]]:
+    """Filter a stats dict to gold/lore/currency-ish keys, then fill remaining."""
+    if not isinstance(stats, dict):
+        return []
+    tokens = ("GOLD", "LORE", "CURRENCY", "XP", "LEVEL", "KILL", "SPENT", "COLLECT")
+    items = sorted(stats.items(), key=lambda item: str(item[0]))
+    primary = [
+        (k, v)
+        for k, v in items
+        if any(tok in str(k).upper() for tok in tokens)
+    ]
+    if len(primary) >= limit:
+        return primary[:limit]
+    primary_keys = {k for k, _ in primary}
+    rest = [(k, v) for k, v in items if k not in primary_keys]
+    return primary + rest[: max(0, limit - len(primary))]
+
+
+def list_save_candidates() -> list[dict[str, Any]]:
+    """Discover User.ftk2 and GameRuns mains for the sidebar."""
+    items: list[dict[str, Any]] = []
+    if USER_SAVE.exists():
+        items.append(
+            {
+                "label": "User.ftk2 (profile)",
+                "path": USER_SAVE,
+                "kind": "user",
+                "mtime": USER_SAVE.stat().st_mtime,
+            }
+        )
+    if GAME_RUNS_DIR.exists():
+        mains = [
+            p
+            for p in GAME_RUNS_DIR.glob("*.ftk2")
+            if not p.stem.rsplit("-", 1)[-1].isdigit()
+        ]
+        mains.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        for path in mains:
+            items.append(
+                {
+                    "label": path.name,
+                    "path": path,
+                    "kind": "run",
+                    "mtime": path.stat().st_mtime,
+                }
+            )
+        # Also include newest numbered slots that have a saveName-worthy size? skip for noise
+    return items
+
+
+def load_save_view(path: Path) -> dict[str, Any]:
+    """Parse a save into a GUI-friendly view model."""
+    path = Path(path)
+    data = path.read_bytes()
+    parsed = parse_ftk2(data)
+    obj = parsed.get("json") if isinstance(parsed.get("json"), dict) else {}
+    summary = parsed.get("summary") if isinstance(parsed.get("summary"), dict) else {}
+
+    kind = "run" if summary or "Entities" in obj else "user"
+    party: list[dict[str, Any]] = []
+    stats: dict[str, Any] = {}
+    overview: dict[str, Any] = {
+        "path": str(path),
+        "file_size": parsed.get("file_size"),
+        "plaintext_size": parsed.get("plaintext_size"),
+        "parse_error": parsed.get("parse_error"),
+        "kind": kind,
+    }
+
+    if kind == "user":
+        party = party_from_user(obj)
+        stats = obj.get("LocalStats") or {}
+        overview.update(
+            {
+                "title": "User profile",
+                "version": obj.get("LastPlayedVersionString"),
+                "difficulty": obj.get("LastUsedDifficulty"),
+                "last_run": obj.get("LastGameRunIdPlayed"),
+                "lore": stats.get("TOTAL_LORE") if isinstance(stats, dict) else None,
+                "gold_collected": stats.get("GOLD_COLLECTED") if isinstance(stats, dict) else None,
+                "gold_spent": stats.get("GOLD_SPENT") if isinstance(stats, dict) else None,
+                "language": obj.get("Language"),
+                "unlocks": len(obj.get("NewLoreStoreUnlocks") or []),
+            }
+        )
+        # If last run exists, optionally note preferred guids for later
+        preferred = [row["guid"] for row in party if row.get("guid")]
+    else:
+        preferred = None
+        # Try to align with User party guids when available
+        if USER_SAVE.exists():
+            try:
+                user_view = parse_ftk2(USER_SAVE.read_bytes())
+                user_obj = user_view.get("json") or {}
+                preferred = [
+                    e.get("Guid")
+                    for e in (user_obj.get("PartyCharacters") or [])
+                    if isinstance(e, dict) and e.get("Guid")
+                ]
+            except Exception:
+                preferred = None
+        party = party_from_run(obj, preferred_guids=preferred)
+        stats = obj.get("Stats") or {}
+        overview.update(
+            {
+                "title": summary.get("saveName") or path.stem,
+                "run_id": summary.get("runID") or path.stem.rsplit("-", 1)[0],
+                "adventure": summary.get("adventureType") or obj.get("ConfigName"),
+                "difficulty": summary.get("difficulty") or obj.get("GameDifficulty"),
+                "version": summary.get("version") or obj.get("Version"),
+                "date": summary.get("dateTime"),
+                "entity_count": len(obj.get("Entities") or []),
+                "gold_collected": stats.get("GOLD_COLLECTED") if isinstance(stats, dict) else None,
+                "gold_spent": stats.get("GOLD_SPENT") if isinstance(stats, dict) else None,
+                "party_gold_total": sum((row.get("gold") or 0) for row in party),
+            }
+        )
+
+    # Slim JSON for tree: drop giant Entities list from root copy
+    tree_root: dict[str, Any]
+    if kind == "run" and "Entities" in obj:
+        tree_root = {k: v for k, v in obj.items() if k != "Entities"}
+        tree_root["Entities"] = f"<{len(obj.get('Entities') or [])} entities — see Party tab>"
+        if summary:
+            tree_root = {"_summary": summary, **tree_root}
+    else:
+        tree_root = obj
+
+    return {
+        "path": path,
+        "kind": kind,
+        "overview": overview,
+        "party": party,
+        "stats": stats if isinstance(stats, dict) else {},
+        "stats_rows": interesting_stats(stats if isinstance(stats, dict) else {}),
+        "summary": summary,
+        "tree": tree_root,
+        "raw": parsed,
+        "unlocks": list(obj.get("NewLoreStoreUnlocks") or []) if kind == "user" else [],
+    }

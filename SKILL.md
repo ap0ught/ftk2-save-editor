@@ -31,7 +31,7 @@ Also: `.ftk2z` = LZ4 path; `.json` = unencrypted path (in code).
 
 `GameRuns/*.ftk2` decrypt to `//**{summary}**//\n{GameRunData JSON}`.
 
-See `decompiled/FORMAT.md` and `decompiled/SaveGameHelper.cs`.
+See `decompiled/FORMAT.md` (schema), `decompiled/HOWTO.md` (decompile → key), and `decompiled/SaveGameHelper.cs`.
 
 ## Gold and party data
 
@@ -56,6 +56,8 @@ Game runs: same folder under `GameRuns/`.
 cd /home/cmayfield/code/games/ftk2/ftk2-save-editor
 source .venv/bin/activate   # or: python3 -m venv .venv && pip install -e .
 
+ftk2-gui   # desktop reader (party gold, inventory, stats, JSON)
+
 ftk2-edit --info
 ftk2-edit --decrypt /tmp/User.json
 ftk2-edit --encrypt-from /tmp/User.json --output /tmp/User.ftk2
@@ -65,6 +67,7 @@ ftk2-edit --verify-only
 # Expedition wallet: decrypt a GameRuns/*.ftk2 and edit CURRENCY_ADVENTURE._stackCount
 ftk2-edit GameRuns/<uuid>.ftk2 --decrypt /tmp/run.txt
 ```
+
 
 ## Caveats
 

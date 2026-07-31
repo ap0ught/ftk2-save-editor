@@ -1,0 +1,492 @@
+"""PySide6 GUI for browsing For The King II save files."""
+
+from __future__ import annotations
+
+import json
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from PySide6.QtCore import QObject, Qt, QThread, Signal
+from PySide6.QtGui import QAction, QCloseEvent, QFont
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMainWindow,
+    QMessageBox,
+    QSplitter,
+    QStatusBar,
+    QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QTextEdit,
+    QToolBar,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from ftk2_editor import FTK2_GAME_DIR, decrypt_ftk2_bytes
+from ftk2_editor.viewmodel import list_save_candidates, load_save_view
+
+APP_TITLE = "FTK2 Save Reader"
+MAX_TREE_CHILDREN = 200
+MAX_TREE_DEPTH = 6
+
+
+class LoadWorker(QThread):
+    """Parse a save file on a background thread."""
+
+    finished_ok = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, path: Path, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.path = path
+
+    def run(self) -> None:
+        try:
+            self.finished_ok.emit(load_save_view(self.path))
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+
+
+class MainWindow(QMainWindow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle(APP_TITLE)
+        self.resize(1200, 740)
+
+        self._view: dict[str, Any] | None = None
+        self._path: Path | None = None
+        self._party_rows: list[dict[str, Any]] = []
+        self._worker: LoadWorker | None = None
+        self._load_generation = 0
+        self._sidebar_paths: list[Path] = []
+
+        self._build_actions()
+        self._build_ui()
+        self.refresh_sidebar()
+        self.statusBar().showMessage("Open User.ftk2 or a GameRuns save to begin.")
+
+    def _build_actions(self) -> None:
+        open_act = QAction("Open…", self)
+        open_act.setShortcut("Ctrl+O")
+        open_act.triggered.connect(self.open_file_dialog)
+
+        user_act = QAction("Open User.ftk2", self)
+        user_act.triggered.connect(self.open_user_save)
+
+        refresh_act = QAction("Refresh list", self)
+        refresh_act.triggered.connect(self.refresh_sidebar)
+
+        export_act = QAction("Export decrypted JSON…", self)
+        export_act.triggered.connect(self.export_json)
+
+        quit_act = QAction("Quit", self)
+        quit_act.setShortcut("Ctrl+Q")
+        quit_act.triggered.connect(self.close)
+
+        file_menu = self.menuBar().addMenu("&File")
+        file_menu.addAction(open_act)
+        file_menu.addAction(user_act)
+        file_menu.addAction(refresh_act)
+        file_menu.addSeparator()
+        file_menu.addAction(export_act)
+        file_menu.addSeparator()
+        file_menu.addAction(quit_act)
+
+        toolbar = QToolBar("Main")
+        toolbar.setMovable(False)
+        self.addToolBar(toolbar)
+        toolbar.addAction(open_act)
+        toolbar.addAction(user_act)
+        toolbar.addAction(refresh_act)
+        toolbar.addAction(export_act)
+
+    def _build_ui(self) -> None:
+        root = QWidget()
+        self.setCentralWidget(root)
+        layout = QHBoxLayout(root)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        layout.addWidget(splitter)
+
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.addWidget(QLabel("Saves"))
+        path_hint = QLabel(str(FTK2_GAME_DIR))
+        path_hint.setWordWrap(True)
+        path_hint.setStyleSheet("color: #9aa3ad;")
+        left_layout.addWidget(path_hint)
+        self.save_list = QListWidget()
+        # itemClicked avoids loads from clear()/programmatic selection changes
+        self.save_list.itemClicked.connect(self._on_sidebar_item_clicked)
+        left_layout.addWidget(self.save_list)
+        splitter.addWidget(left)
+
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        self.path_label = QLabel("No file loaded")
+        self.path_label.setStyleSheet("color: #9aa3ad;")
+        right_layout.addWidget(self.path_label)
+
+        self.tabs = QTabWidget()
+        right_layout.addWidget(self.tabs)
+
+        self.overview = QTextEdit()
+        self.overview.setReadOnly(True)
+        self.overview.setFont(QFont("Consolas", 11))
+        self.tabs.addTab(self.overview, "Overview")
+
+        self.party_table = QTableWidget(0, 7)
+        self.party_table.setHorizontalHeaderLabels(
+            ["Name", "Class", "HP", "Focus", "Gold", "XP", "Map"]
+        )
+        self.party_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.party_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.party_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.party_table.horizontalHeader().setStretchLastSection(True)
+        self.party_table.itemSelectionChanged.connect(self._on_party_select)
+        self.tabs.addTab(self.party_table, "Party")
+
+        inv_wrap = QWidget()
+        inv_layout = QVBoxLayout(inv_wrap)
+        self.inventory_label = QLabel("Select a party member")
+        self.inventory_label.setStyleSheet("color: #9aa3ad;")
+        inv_layout.addWidget(self.inventory_label)
+        self.inventory_table = QTableWidget(0, 3)
+        self.inventory_table.setHorizontalHeaderLabels(["Type", "Item", "Qty"])
+        self.inventory_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.inventory_table.horizontalHeader().setStretchLastSection(True)
+        inv_layout.addWidget(self.inventory_table)
+        self.tabs.addTab(inv_wrap, "Inventory")
+
+        stats_wrap = QWidget()
+        stats_layout = QVBoxLayout(stats_wrap)
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("Filter"))
+        self.stats_filter = QLineEdit()
+        self.stats_filter.setPlaceholderText("gold, lore, …")
+        self.stats_filter.textChanged.connect(self._populate_stats)
+        filter_row.addWidget(self.stats_filter)
+        stats_layout.addLayout(filter_row)
+        self.stats_table = QTableWidget(0, 2)
+        self.stats_table.setHorizontalHeaderLabels(["Stat", "Value"])
+        self.stats_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.stats_table.horizontalHeader().setStretchLastSection(True)
+        stats_layout.addWidget(self.stats_table)
+        self.tabs.addTab(stats_wrap, "Stats")
+
+        self.json_tree = QTreeWidget()
+        self.json_tree.setHeaderLabels(["Key", "Value"])
+        self.json_tree.header().setStretchLastSection(True)
+        self.tabs.addTab(self.json_tree, "JSON")
+
+        splitter.addWidget(right)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([300, 900])
+
+        self.setStatusBar(QStatusBar())
+        self.setStyleSheet(
+            """
+            QMainWindow, QWidget { background: #1c1f24; color: #e8eaed; }
+            QListWidget, QTextEdit, QTableWidget, QTreeWidget, QLineEdit {
+                background: #15181d; color: #e8eaed; border: 1px solid #2a2f38;
+            }
+            QHeaderView::section { background: #2a2f38; color: #e8eaed; padding: 4px; }
+            QTabBar::tab { background: #2a2f38; color: #c5c9d0; padding: 8px 14px; }
+            QTabBar::tab:selected { background: #3a4554; color: #ffffff; }
+            QToolBar { background: #15181d; border: none; spacing: 6px; }
+            QStatusBar { background: #12151a; color: #9aa3ad; }
+            QMenuBar { background: #15181d; color: #e8eaed; }
+            QMenu { background: #1c1f24; color: #e8eaed; }
+            """
+        )
+
+    def refresh_sidebar(self) -> None:
+        self.save_list.clear()
+        self._sidebar_paths = []
+        for item in list_save_candidates():
+            path: Path = item["path"]
+            mtime = datetime.fromtimestamp(item["mtime"]).strftime("%Y-%m-%d %H:%M")
+            size_mb = path.stat().st_size / (1024 * 1024)
+            label = f"{item['label']}  ·  {mtime}  ·  {size_mb:.1f} MB"
+            self.save_list.addItem(QListWidgetItem(label))
+            self._sidebar_paths.append(path)
+        self.statusBar().showMessage(f"Found {len(self._sidebar_paths)} save(s).")
+
+    def _on_sidebar_item_clicked(self, item: QListWidgetItem) -> None:
+        row = self.save_list.row(item)
+        if row < 0 or row >= len(self._sidebar_paths):
+            return
+        self.load_path(self._sidebar_paths[row])
+
+    def open_user_save(self) -> None:
+        user = FTK2_GAME_DIR / "User.ftk2"
+        if not user.exists():
+            QMessageBox.critical(self, APP_TITLE, f"User.ftk2 not found:\n{user}")
+            return
+        self.load_path(user)
+
+    def open_file_dialog(self) -> None:
+        initial = str(FTK2_GAME_DIR if FTK2_GAME_DIR.exists() else Path.home())
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open FTK2 save",
+            initial,
+            "FTK2 saves (*.ftk2);;All files (*)",
+        )
+        if path:
+            self.load_path(Path(path))
+
+    def _stop_loader(self) -> None:
+        """Wait for any in-flight load (QThread.run returns → thread finished)."""
+        worker = self._worker
+        if worker is None:
+            return
+        self._worker = None
+        if worker.isRunning():
+            # Do not call quit()/terminate for a QThread subclass that only
+            # overrides run() — wait until parsing finishes.
+            worker.wait()
+        worker.deleteLater()
+
+    def load_path(self, path: Path) -> None:
+        self._load_generation += 1
+        generation = self._load_generation
+        self._stop_loader()
+
+        self._path = Path(path)
+        self.path_label.setText(str(path))
+        self.statusBar().showMessage(f"Loading {path.name}…")
+
+        worker = LoadWorker(self._path, self)
+        worker.finished_ok.connect(lambda view, g=generation: self._on_loaded(g, view))
+        worker.failed.connect(lambda message, g=generation: self._on_load_failed(g, message))
+        worker.finished.connect(worker.deleteLater)
+        self._worker = worker
+        worker.start()
+
+    def _on_load_failed(self, generation: int, message: str) -> None:
+        if generation != self._load_generation:
+            return
+        if self._worker is not None and not self._worker.isRunning():
+            self._worker = None
+        QMessageBox.critical(self, APP_TITLE, f"Failed to load save:\n{message}")
+        self.statusBar().showMessage("Load failed")
+
+    def _on_loaded(self, generation: int, view: dict[str, Any]) -> None:
+        if generation != self._load_generation:
+            return
+        if self._worker is not None and not self._worker.isRunning():
+            self._worker = None
+        self._view = view
+        self._party_rows = list(view.get("party") or [])
+        self._populate_overview()
+        self._populate_party()
+        self._populate_inventory(None)
+        self._populate_stats()
+        self._populate_json_tree()
+        gold_total = view["overview"].get("party_gold_total")
+        extra = f" · party gold {gold_total}" if gold_total is not None else ""
+        name = Path(view["path"]).name if view.get("path") else ""
+        self.statusBar().showMessage(f"Loaded {name} ({view['kind']}){extra}")
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self._load_generation += 1  # ignore late UI updates
+        self._stop_loader()
+        super().closeEvent(event)
+
+    def _populate_overview(self) -> None:
+        assert self._view is not None
+        o = self._view["overview"]
+        lines = [
+            str(o.get("title") or "Save"),
+            "",
+            f"Path: {o.get('path')}",
+            f"Kind: {o.get('kind')}",
+            f"File size: {o.get('file_size')} bytes",
+            f"Plaintext size: {o.get('plaintext_size')} bytes",
+        ]
+        if o.get("parse_error"):
+            lines.append(f"Parse note: {o['parse_error']}")
+        lines.append("")
+        if o.get("kind") == "user":
+            lines.extend(
+                [
+                    f"Version: {o.get('version')}",
+                    f"Difficulty: {o.get('difficulty')}",
+                    f"Language: {o.get('language')}",
+                    f"Last run: {o.get('last_run')}",
+                    f"TOTAL_LORE: {o.get('lore')}",
+                    f"GOLD_COLLECTED (lifetime): {o.get('gold_collected')}",
+                    f"GOLD_SPENT (lifetime): {o.get('gold_spent')}",
+                    f"Lore store unlocks: {o.get('unlocks')}",
+                    "",
+                    "Wallet gold lives on GameRuns characters as CURRENCY_ADVENTURE,",
+                    "not in User.ftk2 LocalStats.",
+                ]
+            )
+            unlocks = self._view.get("unlocks") or []
+            if unlocks:
+                lines.append("")
+                lines.append("NewLoreStoreUnlocks:")
+                lines.extend(f"  - {u}" for u in unlocks)
+        else:
+            lines.extend(
+                [
+                    f"Save name: {o.get('title')}",
+                    f"Run ID: {o.get('run_id')}",
+                    f"Adventure: {o.get('adventure')}",
+                    f"Difficulty: {o.get('difficulty')}",
+                    f"Version: {o.get('version')}",
+                    f"Date: {o.get('date')}",
+                    f"Entities: {o.get('entity_count')}",
+                    f"Run GOLD_COLLECTED: {o.get('gold_collected')}",
+                    f"Run GOLD_SPENT: {o.get('gold_spent')}",
+                    f"Party wallet total: {o.get('party_gold_total')}",
+                ]
+            )
+        self.overview.setPlainText("\n".join(lines))
+
+    def _populate_party(self) -> None:
+        self.party_table.setRowCount(0)
+        self.party_table.setRowCount(len(self._party_rows))
+        for row_idx, row in enumerate(self._party_rows):
+            values = [
+                row.get("name"),
+                row.get("class"),
+                row.get("health"),
+                row.get("focus"),
+                row.get("gold") if row.get("gold") is not None else "—",
+                row.get("xp") if row.get("xp") is not None else "—",
+                row.get("map_id") or "",
+            ]
+            for col, value in enumerate(values):
+                self.party_table.setItem(row_idx, col, QTableWidgetItem("" if value is None else str(value)))
+
+    def _on_party_select(self) -> None:
+        rows = self.party_table.selectionModel().selectedRows()
+        if not rows:
+            return
+        idx = rows[0].row()
+        if 0 <= idx < len(self._party_rows):
+            self._populate_inventory(self._party_rows[idx])
+            self.tabs.setCurrentIndex(2)
+
+    def _populate_inventory(self, row: dict[str, Any] | None) -> None:
+        self.inventory_table.setRowCount(0)
+        if row is None:
+            self.inventory_label.setText("Select a party member on the Party tab")
+            return
+        gold = row.get("gold")
+        self.inventory_label.setText(
+            f"{row.get('name')} · {row.get('class')} · gold={gold if gold is not None else '—'}"
+        )
+        inventory = row.get("inventory") or []
+        self.inventory_table.setRowCount(len(inventory))
+        for i, entry in enumerate(inventory):
+            self.inventory_table.setItem(i, 0, QTableWidgetItem(str(entry.get("type") or "")))
+            self.inventory_table.setItem(i, 1, QTableWidgetItem(str(entry.get("config") or "")))
+            self.inventory_table.setItem(i, 2, QTableWidgetItem(str(entry.get("count"))))
+
+    def _populate_stats(self) -> None:
+        self.stats_table.setRowCount(0)
+        if not self._view:
+            return
+        needle = self.stats_filter.text().strip().lower()
+        rows = list(self._view.get("stats_rows") or [])
+        if needle and isinstance(self._view.get("stats"), dict):
+            rows = [
+                (k, v)
+                for k, v in sorted(self._view["stats"].items(), key=lambda item: str(item[0]))
+                if needle in str(k).lower() or needle in str(v).lower()
+            ]
+        self.stats_table.setRowCount(len(rows))
+        for i, (key, value) in enumerate(rows):
+            self.stats_table.setItem(i, 0, QTableWidgetItem(str(key)))
+            self.stats_table.setItem(i, 1, QTableWidgetItem(str(value)))
+
+    def _populate_json_tree(self) -> None:
+        self.json_tree.clear()
+        if not self._view:
+            return
+        root = QTreeWidgetItem(["root", ""])
+        self.json_tree.addTopLevelItem(root)
+        self._insert_json_node(root, self._view.get("tree"), depth=0)
+        root.setExpanded(True)
+
+    def _insert_json_node(self, parent: QTreeWidgetItem, value: Any, *, depth: int) -> None:
+        if depth > MAX_TREE_DEPTH:
+            parent.addChild(QTreeWidgetItem(["…", ""]))
+            return
+        if isinstance(value, dict):
+            parent.setText(1, f"{{{len(value)}}}")
+            for i, (child_key, child_val) in enumerate(value.items()):
+                if i >= MAX_TREE_CHILDREN:
+                    parent.addChild(QTreeWidgetItem(["…", f"+{len(value) - i} more"]))
+                    break
+                child = QTreeWidgetItem([str(child_key), ""])
+                parent.addChild(child)
+                self._insert_json_node(child, child_val, depth=depth + 1)
+        elif isinstance(value, list):
+            parent.setText(1, f"[{len(value)}]")
+            for i, child_val in enumerate(value):
+                if i >= MAX_TREE_CHILDREN:
+                    parent.addChild(QTreeWidgetItem(["…", f"+{len(value) - i} more"]))
+                    break
+                child = QTreeWidgetItem([f"[{i}]", ""])
+                parent.addChild(child)
+                self._insert_json_node(child, child_val, depth=depth + 1)
+        else:
+            preview = value
+            if isinstance(preview, str) and len(preview) > 200:
+                preview = preview[:197] + "…"
+            parent.setText(1, "" if preview is None else str(preview))
+
+    def export_json(self) -> None:
+        if not self._path:
+            QMessageBox.information(self, APP_TITLE, "Load a save first.")
+            return
+        out, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export decrypted JSON",
+            str(self._path.with_suffix(".json")),
+            "JSON (*.json);;Text (*.txt);;All files (*)",
+        )
+        if not out:
+            return
+        try:
+            plain = decrypt_ftk2_bytes(self._path.read_bytes())
+            if plain.lstrip().startswith("//**"):
+                Path(out).write_text(plain, encoding="utf-8")
+            else:
+                obj = json.loads(plain)
+                Path(out).write_text(
+                    json.dumps(obj, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+            self.statusBar().showMessage(f"Exported {out}")
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, APP_TITLE, f"Export failed:\n{exc}")
+
+
+def main() -> None:
+    app = QApplication(sys.argv)
+    app.setApplicationName(APP_TITLE)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

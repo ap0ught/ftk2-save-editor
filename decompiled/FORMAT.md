@@ -151,6 +151,8 @@ ilspycmd "/path/to/Managed/FTK2.dll" -t SaveGameHelper -r "/path/to/Managed" > d
 
 `.tools/` is gitignored (portable .NET SDK + ilspycmd).
 
+Narrative of how the key was found: [`HOWTO.md`](HOWTO.md).
+
 ## Round-trip check
 
 ```bash

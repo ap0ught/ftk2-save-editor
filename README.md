@@ -1,6 +1,9 @@
 # ftk2-save-editor
 
-Save editor for **For The King II** (Steam appid 1676840) on Linux / Proton.
+Save **viewer / editor** for **For The King II** (Steam appid 1676840) on Linux / Proton.
+
+Built by decompiling `FTK2.dll` → finding XOR key `21398xa2` in `SaveGameHelper` →
+treating `.ftk2` as obfuscated JSON. Full story: [`decompiled/HOWTO.md`](decompiled/HOWTO.md).
 
 ## Format (confirmed via FTK2.dll decompile)
 
@@ -8,7 +11,7 @@ Save editor for **For The King II** (Steam appid 1676840) on Linux / Proton.
 
 - Key: `21398xa2` (`SaveGameHelper.encryptString`)
 - Payload: indented `System.Text.Json` for `UserData` / `GameRunData`
-- Details: [`decompiled/FORMAT.md`](decompiled/FORMAT.md)
+- Details: [`decompiled/FORMAT.md`](decompiled/FORMAT.md) · process: [`decompiled/HOWTO.md`](decompiled/HOWTO.md)
 
 ### Gold
 
@@ -27,13 +30,23 @@ Wallet gold is the inventory item **`CURRENCY_ADVENTURE`** on each party member:
 ## Install
 
 ```bash
-cd ftk2-save-editor
+cd /home/cmayfield/code/games/ftk2/ftk2-save-editor
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```
 
-## Usage
+Uses **PySide6** for the GUI (no system `tk` package required).
+
+## GUI
+
+```bash
+ftk2-gui
+```
+
+Browse `User.ftk2` and `GameRuns/*.ftk2`: overview, party wallets (`CURRENCY_ADVENTURE`), inventory, stats, and a trimmed JSON tree. Export decrypted JSON from **File → Export**.
+
+## CLI
 
 ```bash
 # Summary of User.ftk2
