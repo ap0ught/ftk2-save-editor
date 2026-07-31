@@ -1,0 +1,13 @@
+*.pyc
+__pycache__/
+.venv/
+*.bak
+*.egg-info/
+dist/
+build/
+.tools/
+*.decrypted.*
+decompiled/*.decrypted.*
+decompiled/User.decrypted.json
+decompiled/GameRun.sample.decrypted.txt
+.pytest_cache/
