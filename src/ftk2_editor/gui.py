@@ -12,6 +12,7 @@ from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QFont
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -35,7 +36,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ftk2_editor import FTK2_GAME_DIR, backup, decrypt_ftk2_bytes, set_character_gold
+from ftk2_editor import (
+    FTK2_GAME_DIR,
+    backup,
+    decrypt_ftk2_bytes,
+    ensure_character_herb_tool_minimum,
+    set_character_gold,
+)
 from ftk2_editor.viewmodel import list_save_candidates, load_save_view
 
 APP_TITLE = "FTK2 Save Reader"
@@ -70,9 +77,13 @@ class MainWindow(QMainWindow):
         self._view: dict[str, Any] | None = None
         self._path: Path | None = None
         self._party_rows: list[dict[str, Any]] = []
+        self._non_party_rows: list[dict[str, Any]] = []
         self._worker: LoadWorker | None = None
         self._load_generation = 0
         self._sidebar_paths: list[Path] = []
+        self._pending_select_guid: str | None = None
+        self._pending_focus_inventory = False
+        self._inventory_windows: list[QDialog] = []
 
         self._build_actions()
         self._build_ui()
@@ -157,7 +168,9 @@ class MainWindow(QMainWindow):
         self.party_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.party_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.party_table.horizontalHeader().setStretchLastSection(True)
+        self.party_table.setSortingEnabled(True)
         self.party_table.itemSelectionChanged.connect(self._on_party_select)
+        self.party_table.cellDoubleClicked.connect(self._on_party_double_click)
 
         party_wrap = QWidget()
         party_layout = QVBoxLayout(party_wrap)
@@ -198,17 +211,46 @@ class MainWindow(QMainWindow):
         party_layout.addLayout(edit_row)
         self.tabs.addTab(party_wrap, "Party")
 
-        inv_wrap = QWidget()
-        inv_layout = QVBoxLayout(inv_wrap)
+        npc_wrap = QWidget()
+        npc_layout = QVBoxLayout(npc_wrap)
+        self.npc_label = QLabel("Non-party character entities in this run")
+        self.npc_label.setStyleSheet("color: #9aa3ad;")
+        npc_layout.addWidget(self.npc_label)
+        self.npc_table = QTableWidget(0, 7)
+        self.npc_table.setHorizontalHeaderLabels(
+            ["Name", "Class", "HP", "Focus", "Gold", "XP", "Map"]
+        )
+        self.npc_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.npc_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.npc_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.npc_table.horizontalHeader().setStretchLastSection(True)
+        self.npc_table.setSortingEnabled(True)
+        self.npc_table.cellDoubleClicked.connect(self._on_npc_double_click)
+        npc_layout.addWidget(self.npc_table)
+        self.tabs.addTab(npc_wrap, "Non-Party")
+
+        self.inventory_tab = QWidget()
+        inv_layout = QVBoxLayout(self.inventory_tab)
         self.inventory_label = QLabel("Select a party member")
         self.inventory_label.setStyleSheet("color: #9aa3ad;")
         inv_layout.addWidget(self.inventory_label)
+        inv_action_row = QHBoxLayout()
+        self.topup_herb_tool_btn = QPushButton("Set herbs/tools/drinks to min 10")
+        self.topup_herb_tool_btn.setEnabled(False)
+        self.topup_herb_tool_btn.setToolTip(
+            "For selected character, set every herb/tool/drink stack below 10 up to 10"
+        )
+        self.topup_herb_tool_btn.clicked.connect(self.apply_inventory_herb_tool_topup)
+        inv_action_row.addWidget(self.topup_herb_tool_btn)
+        inv_action_row.addStretch(1)
+        inv_layout.addLayout(inv_action_row)
         self.inventory_table = QTableWidget(0, 3)
         self.inventory_table.setHorizontalHeaderLabels(["Type", "Item", "Qty"])
         self.inventory_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.inventory_table.horizontalHeader().setStretchLastSection(True)
+        self.inventory_table.setSortingEnabled(True)
         inv_layout.addWidget(self.inventory_table)
-        self.tabs.addTab(inv_wrap, "Inventory")
+        self.tabs.addTab(self.inventory_tab, "Inventory")
 
         stats_wrap = QWidget()
         stats_layout = QVBoxLayout(stats_wrap)
@@ -223,6 +265,7 @@ class MainWindow(QMainWindow):
         self.stats_table.setHorizontalHeaderLabels(["Stat", "Value"])
         self.stats_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.stats_table.horizontalHeader().setStretchLastSection(True)
+        self.stats_table.setSortingEnabled(True)
         stats_layout.addWidget(self.stats_table)
         self.tabs.addTab(stats_wrap, "Stats")
 
@@ -336,15 +379,78 @@ class MainWindow(QMainWindow):
             self._worker = None
         self._view = view
         self._party_rows = list(view.get("party") or [])
+        self._non_party_rows = list(view.get("non_party") or [])
         self._populate_overview()
         self._populate_party()
-        self._populate_inventory(None)
+        self._populate_non_party()
+        selected = False
+        pending_guid = self._pending_select_guid
+        if pending_guid:
+            selected = self._reselect_party_by_guid(pending_guid)
+            self._pending_select_guid = None
+        if not selected:
+            self._populate_inventory(None)
+        if selected and self._pending_focus_inventory:
+            self.tabs.setCurrentWidget(self.inventory_tab)
+        self._pending_focus_inventory = False
         self._populate_stats()
         self._populate_json_tree()
         gold_total = view["overview"].get("party_gold_total")
         extra = f" · party gold {gold_total}" if gold_total is not None else ""
         name = Path(view["path"]).name if view.get("path") else ""
         self.statusBar().showMessage(f"Loaded {name} ({view['kind']}){extra}")
+
+    def _reselect_party_by_guid(self, guid: str) -> bool:
+        for row_idx in range(self.party_table.rowCount()):
+            item = self.party_table.item(row_idx, 0)
+            if item is None:
+                continue
+            row = item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(row, dict) and row.get("guid") == guid:
+                self.party_table.selectRow(row_idx)
+                return True
+        return False
+
+    def _row_for_table(self, table: QTableWidget, visual_row: int) -> dict[str, Any] | None:
+        if visual_row < 0:
+            return None
+        item = table.item(visual_row, 0)
+        if item is None:
+            return None
+        row = item.data(Qt.ItemDataRole.UserRole)
+        return row if isinstance(row, dict) else None
+
+    def _open_inventory_window(self, row: dict[str, Any], *, title_prefix: str) -> None:
+        inventory = row.get("inventory") or []
+        dialog = QDialog(self)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dialog.setWindowTitle(f"{title_prefix}: {row.get('name')}")
+        dialog.resize(720, 420)
+
+        layout = QVBoxLayout(dialog)
+        gold = row.get("gold")
+        info = QLabel(
+            f"{row.get('name')} · {row.get('class')} · gold={gold if gold is not None else '—'}"
+        )
+        info.setStyleSheet("color: #9aa3ad;")
+        layout.addWidget(info)
+
+        table = QTableWidget(0, 3)
+        table.setHorizontalHeaderLabels(["Type", "Item", "Qty"])
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setSortingEnabled(False)
+        table.setRowCount(len(inventory))
+        for i, entry in enumerate(inventory):
+            table.setItem(i, 0, QTableWidgetItem(str(entry.get("type") or "")))
+            table.setItem(i, 1, QTableWidgetItem(str(entry.get("config") or "")))
+            table.setItem(i, 2, QTableWidgetItem(str(entry.get("count"))))
+        table.setSortingEnabled(True)
+        layout.addWidget(table)
+
+        self._inventory_windows.append(dialog)
+        dialog.finished.connect(lambda _code: self._inventory_windows.remove(dialog) if dialog in self._inventory_windows else None)
+        dialog.show()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._load_generation += 1  # ignore late UI updates
@@ -387,6 +493,10 @@ class MainWindow(QMainWindow):
                 lines.append("NewLoreStoreUnlocks:")
                 lines.extend(f"  - {u}" for u in unlocks)
         else:
+            house_rules = o.get("house_rules") if isinstance(o.get("house_rules"), dict) else None
+            house_rules_label = "none"
+            if house_rules:
+                house_rules_label = str(len(house_rules))
             lines.extend(
                 [
                     f"Save name: {o.get('title')}",
@@ -396,14 +506,21 @@ class MainWindow(QMainWindow):
                     f"Version: {o.get('version')}",
                     f"Date: {o.get('date')}",
                     f"Entities: {o.get('entity_count')}",
+                    f"HouseRules: {house_rules_label}",
                     f"Run GOLD_COLLECTED: {o.get('gold_collected')}",
                     f"Run GOLD_SPENT: {o.get('gold_spent')}",
                     f"Party wallet total: {o.get('party_gold_total')}",
                 ]
             )
+            if house_rules:
+                lines.append("")
+                lines.append("HouseRules values:")
+                for key, value in sorted(house_rules.items(), key=lambda item: str(item[0])):
+                    lines.append(f"  - {key}: {value}")
         self.overview.setPlainText("\n".join(lines))
 
     def _populate_party(self) -> None:
+        self.party_table.setSortingEnabled(False)
         self.party_table.setRowCount(0)
         self.party_table.setRowCount(len(self._party_rows))
         for row_idx, row in enumerate(self._party_rows):
@@ -417,7 +534,32 @@ class MainWindow(QMainWindow):
                 row.get("map_id") or "",
             ]
             for col, value in enumerate(values):
-                self.party_table.setItem(row_idx, col, QTableWidgetItem("" if value is None else str(value)))
+                item = QTableWidgetItem("" if value is None else str(value))
+                if col == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, row)
+                self.party_table.setItem(row_idx, col, item)
+        self.party_table.setSortingEnabled(True)
+
+    def _populate_non_party(self) -> None:
+        self.npc_table.setSortingEnabled(False)
+        self.npc_table.setRowCount(0)
+        self.npc_table.setRowCount(len(self._non_party_rows))
+        for row_idx, row in enumerate(self._non_party_rows):
+            values = [
+                row.get("name"),
+                row.get("class"),
+                row.get("health"),
+                row.get("focus"),
+                row.get("gold") if row.get("gold") is not None else "—",
+                row.get("xp") if row.get("xp") is not None else "—",
+                row.get("map_id") or "",
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem("" if value is None else str(value))
+                if col == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, row)
+                self.npc_table.setItem(row_idx, col, item)
+        self.npc_table.setSortingEnabled(True)
 
     def _set_gold_controls_enabled(self, enabled: bool) -> None:
         self.gold_spin.setEnabled(enabled)
@@ -426,30 +568,57 @@ class MainWindow(QMainWindow):
         for btn in self._gold_preset_buttons:
             btn.setEnabled(enabled)
 
-    def _on_party_select(self) -> None:
+    def _set_inventory_controls_enabled(self, enabled: bool) -> None:
+        self.topup_herb_tool_btn.setEnabled(enabled)
+
+    def _selected_party_row(self) -> dict[str, Any] | None:
         rows = self.party_table.selectionModel().selectedRows()
         if not rows:
-            self._set_gold_controls_enabled(False)
-            return
+            return None
         idx = rows[0].row()
-        if 0 <= idx < len(self._party_rows):
-            row = self._party_rows[idx]
-            self._populate_inventory(row)
-            # Stay on Party tab so gold controls remain visible.
-            can_edit = (
-                self._view is not None
-                and self._view.get("kind") == "run"
-                and bool(row.get("guid"))
-            )
-            self._set_gold_controls_enabled(can_edit)
-            if row.get("gold") is not None:
-                self.gold_spin.setValue(int(row["gold"]))
-            else:
-                self.gold_spin.setValue(0)
-            if can_edit:
-                self.gold_hint.setText(f"Editing {row.get('name')} wallet (CURRENCY_ADVENTURE)")
-            else:
-                self.gold_hint.setText("Gold editing requires a GameRuns/*.ftk2 file.")
+        if idx < 0:
+            return None
+        item = self.party_table.item(idx, 0)
+        if item is None:
+            return None
+        row = item.data(Qt.ItemDataRole.UserRole)
+        return row if isinstance(row, dict) else None
+
+    def _on_party_select(self) -> None:
+        row = self._selected_party_row()
+        if row is None:
+            self._set_gold_controls_enabled(False)
+            self._set_inventory_controls_enabled(False)
+            return
+        self._populate_inventory(row)
+        # Stay on Party tab so gold controls remain visible.
+        can_edit = (
+            self._view is not None
+            and self._view.get("kind") == "run"
+            and bool(row.get("guid"))
+        )
+        self._set_gold_controls_enabled(can_edit)
+        self._set_inventory_controls_enabled(can_edit)
+        if row.get("gold") is not None:
+            self.gold_spin.setValue(int(row["gold"]))
+        else:
+            self.gold_spin.setValue(0)
+        if can_edit:
+            self.gold_hint.setText(f"Editing {row.get('name')} wallet (CURRENCY_ADVENTURE)")
+        else:
+            self.gold_hint.setText("Gold editing requires a GameRuns/*.ftk2 file.")
+
+    def _on_party_double_click(self, row_idx: int, _col_idx: int) -> None:
+        row = self._row_for_table(self.party_table, row_idx)
+        if row is None:
+            return
+        self._open_inventory_window(row, title_prefix="Party Inventory")
+
+    def _on_npc_double_click(self, row_idx: int, _col_idx: int) -> None:
+        row = self._row_for_table(self.npc_table, row_idx)
+        if row is None:
+            return
+        self._open_inventory_window(row, title_prefix="Non-Party Inventory")
 
     def apply_selected_gold(self) -> None:
         if not self._path or not self._view or self._view.get("kind") != "run":
@@ -460,11 +629,10 @@ class MainWindow(QMainWindow):
                 "User.ftk2 only has lifetime GOLD_* stats, not party wallets.",
             )
             return
-        rows = self.party_table.selectionModel().selectedRows()
-        if not rows:
+        row = self._selected_party_row()
+        if row is None:
             QMessageBox.information(self, APP_TITLE, "Select a party member first.")
             return
-        row = self._party_rows[rows[0].row()]
         guid = row.get("guid")
         if not guid:
             QMessageBox.warning(self, APP_TITLE, "Selected character has no Guid.")
@@ -538,9 +706,11 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, APP_TITLE, f"Save failed:\n{exc}")
 
     def _populate_inventory(self, row: dict[str, Any] | None) -> None:
+        self.inventory_table.setSortingEnabled(False)
         self.inventory_table.setRowCount(0)
         if row is None:
             self.inventory_label.setText("Select a party member on the Party tab")
+            self.inventory_table.setSortingEnabled(True)
             return
         gold = row.get("gold")
         self.inventory_label.setText(
@@ -552,10 +722,69 @@ class MainWindow(QMainWindow):
             self.inventory_table.setItem(i, 0, QTableWidgetItem(str(entry.get("type") or "")))
             self.inventory_table.setItem(i, 1, QTableWidgetItem(str(entry.get("config") or "")))
             self.inventory_table.setItem(i, 2, QTableWidgetItem(str(entry.get("count"))))
+        self.inventory_table.setSortingEnabled(True)
+
+    def apply_inventory_herb_tool_topup(self) -> None:
+        if not self._path or not self._view or self._view.get("kind") != "run":
+            QMessageBox.warning(
+                self,
+                APP_TITLE,
+                "Open a GameRuns/*.ftk2 expedition save to edit party inventory.",
+            )
+            return
+        row = self._selected_party_row()
+        if row is None:
+            QMessageBox.information(self, APP_TITLE, "Select a party member first.")
+            return
+        guid = row.get("guid")
+        if not guid:
+            QMessageBox.warning(self, APP_TITLE, "Selected character has no Guid.")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            APP_TITLE,
+            f"Set all herb/tool/drink stacks below 10 to 10 for {row.get('name')}?\n\n"
+            f"File: {self._path}\n"
+            "A .bak backup will be created if changes are needed."
+            " Quit the game first if it is running.",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            data = self._path.read_bytes()
+            modified, ok, updated = ensure_character_herb_tool_minimum(
+                data,
+                str(guid),
+                minimum=10,
+            )
+            if not ok:
+                QMessageBox.critical(self, APP_TITLE, "Could not find that character in the run.")
+                return
+            if updated == 0:
+                QMessageBox.information(
+                    self,
+                    APP_TITLE,
+                    f"No herb/tool/drink stacks below 10 for {row.get('name')}.",
+                )
+                return
+
+            bak = backup(self._path)
+            self._path.write_bytes(modified)
+            self.statusBar().showMessage(
+                f"Updated {updated} herb/tool/drink stacks for {row.get('name')} (backup {bak.name})"
+            )
+            self._pending_select_guid = str(guid)
+            self._pending_focus_inventory = True
+            self.load_path(self._path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, APP_TITLE, f"Save failed:\n{exc}")
 
     def _populate_stats(self) -> None:
+        self.stats_table.setSortingEnabled(False)
         self.stats_table.setRowCount(0)
         if not self._view:
+            self.stats_table.setSortingEnabled(True)
             return
         needle = self.stats_filter.text().strip().lower()
         rows = list(self._view.get("stats_rows") or [])
@@ -569,6 +798,7 @@ class MainWindow(QMainWindow):
         for i, (key, value) in enumerate(rows):
             self.stats_table.setItem(i, 0, QTableWidgetItem(str(key)))
             self.stats_table.setItem(i, 1, QTableWidgetItem(str(value)))
+        self.stats_table.setSortingEnabled(True)
 
     def _populate_json_tree(self) -> None:
         self.json_tree.clear()

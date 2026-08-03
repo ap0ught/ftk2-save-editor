@@ -6,9 +6,9 @@ from ftk2_editor import USER_SAVE, GAME_RUNS_DIR
 from ftk2_editor.viewmodel import load_save_view, list_save_candidates, party_from_run
 
 
-def test_list_save_candidates_includes_user():
+def test_list_save_candidates_excludes_user():
     paths = [c["path"] for c in list_save_candidates()]
-    assert USER_SAVE in paths
+    assert USER_SAVE not in paths
 
 
 def test_load_user_view():
@@ -25,6 +25,17 @@ def test_load_active_run_party_gold():
     assert run_path.exists()
     view = load_save_view(run_path)
     assert view["kind"] == "run"
+    assert "house_rules" in view["overview"]
+    assert isinstance(view.get("non_party"), list)
+    assert all(
+        row.get("has_player_component") is True
+        or row.get("character_type") == "COMPANION"
+        for row in view.get("party", [])
+    )
+    assert all(
+        (row.get("character_type") in (None, "STANDARD"))
+        for row in view.get("party", [])
+    )
     assert view["overview"]["party_gold_total"] is not None
     assert any(row.get("gold") is not None for row in view["party"])
 

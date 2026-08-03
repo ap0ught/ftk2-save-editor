@@ -52,6 +52,7 @@ def character_from_entity(entity: dict[str, Any]) -> dict[str, Any] | None:
         "guid": entity.get("Guid"),
         "name": name or config or "?",
         "class": config or "",
+        "has_player_component": isinstance(comps.get("PlayerComponent"), dict),
         "character_type": cc.get("CharacterType"),
         "health": cc.get("CurrentHealth"),
         "focus": cc.get("CurrentFocus"),
@@ -70,6 +71,8 @@ def party_from_entities(
     *,
     guids: set[str] | None = None,
     standard_only: bool = True,
+    player_only: bool = False,
+    include_companions: bool = False,
 ) -> list[dict[str, Any]]:
     """Extract unique party-like characters from an Entities list."""
     rows: list[dict[str, Any]] = []
@@ -84,6 +87,10 @@ def party_from_entities(
             ctype = row.get("character_type")
             # User snapshots may omit CharacterType; run players use STANDARD.
             if ctype is not None and ctype != "STANDARD":
+                continue
+        if player_only and not row.get("has_player_component"):
+            ctype = str(row.get("character_type") or "")
+            if not (include_companions and ctype == "COMPANION"):
                 continue
         key = row["name"]
         if key in seen_names:
@@ -118,14 +125,24 @@ def party_from_run(
         return []
     if preferred_guids:
         guid_set = set(preferred_guids)
-        matched = party_from_entities(entities, guids=guid_set, standard_only=False)
+        matched = party_from_entities(
+            entities,
+            guids=guid_set,
+            standard_only=False,
+            player_only=True,
+            include_companions=True,
+        )
         if matched:
             # Preserve preferred order
             by_guid = {row["guid"]: row for row in matched}
             ordered = [by_guid[g] for g in preferred_guids if g in by_guid]
-            extras = [row for row in matched if row["guid"] not in set(preferred_guids)]
-            return ordered + extras
-    return party_from_entities(entities, standard_only=True)
+            return ordered or matched
+    return party_from_entities(
+        entities,
+        standard_only=False,
+        player_only=True,
+        include_companions=True,
+    )
 
 
 def interesting_stats(stats: dict[str, Any] | None, *, limit: int = 80) -> list[tuple[str, Any]]:
@@ -149,15 +166,6 @@ def interesting_stats(stats: dict[str, Any] | None, *, limit: int = 80) -> list[
 def list_save_candidates() -> list[dict[str, Any]]:
     """Discover User.ftk2 and GameRuns mains for the sidebar."""
     items: list[dict[str, Any]] = []
-    if USER_SAVE.exists():
-        items.append(
-            {
-                "label": "User.ftk2 (profile)",
-                "path": USER_SAVE,
-                "kind": "user",
-                "mtime": USER_SAVE.stat().st_mtime,
-            }
-        )
     if GAME_RUNS_DIR.exists():
         mains = [
             p
@@ -188,6 +196,7 @@ def load_save_view(path: Path) -> dict[str, Any]:
 
     kind = "run" if summary or "Entities" in obj else "user"
     party: list[dict[str, Any]] = []
+    non_party: list[dict[str, Any]] = []
     stats: dict[str, Any] = {}
     overview: dict[str, Any] = {
         "path": str(path),
@@ -229,8 +238,16 @@ def load_save_view(path: Path) -> dict[str, Any]:
                 ]
             except Exception:
                 preferred = None
+        all_rows = party_from_entities(obj.get("Entities") or [], standard_only=False)
         party = party_from_run(obj, preferred_guids=preferred)
+        party_guids = {row.get("guid") for row in party if row.get("guid")}
+        non_party = [
+            row
+            for row in all_rows
+            if row.get("guid") not in party_guids
+        ]
         stats = obj.get("Stats") or {}
+        house_rules = obj.get("HouseRules")
         overview.update(
             {
                 "title": summary.get("saveName") or path.stem,
@@ -243,6 +260,7 @@ def load_save_view(path: Path) -> dict[str, Any]:
                 "gold_collected": stats.get("GOLD_COLLECTED") if isinstance(stats, dict) else None,
                 "gold_spent": stats.get("GOLD_SPENT") if isinstance(stats, dict) else None,
                 "party_gold_total": sum((row.get("gold") or 0) for row in party),
+                "house_rules": house_rules if isinstance(house_rules, dict) else None,
             }
         )
 
@@ -261,6 +279,7 @@ def load_save_view(path: Path) -> dict[str, Any]:
         "kind": kind,
         "overview": overview,
         "party": party,
+        "non_party": non_party,
         "stats": stats if isinstance(stats, dict) else {},
         "stats_rows": interesting_stats(stats if isinstance(stats, dict) else {}),
         "summary": summary,
