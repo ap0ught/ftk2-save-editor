@@ -1,0 +1,25 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Test FTK2 Editor",
+			"type": "shell",
+			"command": ".venv/bin/python",
+			"args": [
+				"-m",
+				"pytest",
+				"-q"
+			],
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "Open FTK2 GUI",
+			"type": "shell",
+			"command": ".venv/bin/ftk2-gui",
+			"isBackground": true,
+			"problemMatcher": [],
+			"group": "none"
+		}
+	]
+}

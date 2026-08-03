@@ -337,6 +337,78 @@ def set_character_gold(
     return encrypt_ftk2_text(new_plain), True
 
 
+def ensure_character_herb_tool_minimum(
+    data: bytes,
+    character_guid: str,
+    *,
+    minimum: int = 10,
+) -> tuple[bytes, bool, int]:
+    """Ensure a run character has at least *minimum* for herb/tool/drink entries.
+
+    Returns ``(new_data, ok, updated_entries)`` where ``ok`` means the character
+    was found in a GameRun file.
+    """
+    if minimum < 0:
+        raise ValueError("minimum must be >= 0")
+
+    plain = decrypt_ftk2_bytes(data)
+    parts = _split_gamerun_plain(plain)
+    if parts is None:
+        return data, False, 0
+    summary_text, body_text, joiner = parts
+    try:
+        run = json.loads(body_text)
+    except json.JSONDecodeError:
+        return data, False, 0
+
+    entities = run.get("Entities")
+    if not isinstance(entities, list):
+        return data, False, 0
+
+    updated_entries = 0
+    found_character = False
+    for entity in entities:
+        if entity.get("Guid") != character_guid:
+            continue
+        found_character = True
+        comps = entity.get("Components") or {}
+        cc = comps.get("CharacterComponent") or {}
+        things = cc.get("Things") or []
+        if not isinstance(things, list):
+            return data, False, 0
+
+        for thing in things:
+            if not isinstance(thing, dict):
+                continue
+            config = str(thing.get("ConfigName") or "").upper()
+            thing_type = str(thing.get("Type") or "").upper()
+            is_herb_or_tool = (
+                "HERB" in config
+                or "TOOL" in config
+                or "DRINK" in config
+                or thing_type in {"HERB", "TOOL"}
+            )
+            if not is_herb_or_tool:
+                continue
+            try:
+                count = int(thing.get("_stackCount") or 0)
+            except (TypeError, ValueError):
+                count = 0
+            if count < minimum:
+                thing["_stackCount"] = int(minimum)
+                updated_entries += 1
+        break
+
+    if not found_character:
+        return data, False, 0
+    if updated_entries == 0:
+        return data, True, 0
+
+    new_body = _dump_json_matching_newlines(run, body_text)
+    new_plain = f"//**{summary_text}**//{joiner}{new_body}"
+    return encrypt_ftk2_text(new_plain), True, updated_entries
+
+
 def set_local_stat(data: bytes, stat_name: str, value: int) -> tuple[bytes, bool]:
     """Convenience wrapper for ``LocalStats`` integer edits."""
     return edit_field(data, f"LocalStats.{stat_name}", str(int(value)))

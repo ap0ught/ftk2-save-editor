@@ -12,6 +12,7 @@ from ftk2_editor import (
     decrypt_ftk2_bytes,
     dump_summary,
     edit_field,
+    ensure_character_herb_tool_minimum,
     encrypt_ftk2_text,
     find_save_file,
     parse_ftk2,
@@ -35,6 +36,52 @@ def sample_user_obj() -> dict:
 def sample_save_bytes(sample_user_obj) -> bytes:
     # Match game-ish CRLF indented JSON
     text = json.dumps(sample_user_obj, indent=2).replace("\n", "\r\n") + "\r\n"
+    return encrypt_ftk2_text(text)
+
+
+@pytest.fixture
+def sample_run_bytes() -> bytes:
+    summary = {
+        "runID": "run-123",
+        "saveName": "Test Expedition",
+        "difficulty": "normal",
+    }
+    run = {
+        "Entities": [
+            {
+                "Guid": "hero-1",
+                "Components": {
+                    "CharacterComponent": {
+                        "DisplayName": "Hero",
+                        "ConfigName": "HUNTER",
+                        "Things": [
+                            {
+                                "ConfigName": "HERB_HEALING",
+                                "Type": "ITEM",
+                                "_stackCount": 2,
+                            },
+                            {
+                                "ConfigName": "TOOL_LOCKPICK",
+                                "Type": "ITEM",
+                                "_stackCount": 1,
+                            },
+                            {
+                                "ConfigName": "DRINK_ALE",
+                                "Type": "ITEM",
+                                "_stackCount": 4,
+                            },
+                            {
+                                "ConfigName": "POTION_SPEED",
+                                "Type": "ITEM",
+                                "_stackCount": 3,
+                            },
+                        ],
+                    }
+                },
+            }
+        ]
+    }
+    text = f"//**{json.dumps(summary)}**//\n{json.dumps(run, indent=2)}\n"
     return encrypt_ftk2_text(text)
 
 
@@ -95,6 +142,35 @@ def test_backup_creates_file(tmp_path):
     bak = backup(test_file)
     assert bak.exists()
     assert bak.read_bytes() == test_file.read_bytes()
+
+
+def test_ensure_character_herb_tool_minimum_updates_matching_items(sample_run_bytes):
+    modified, ok, updated = ensure_character_herb_tool_minimum(
+        sample_run_bytes,
+        "hero-1",
+        minimum=10,
+    )
+    assert ok is True
+    assert updated == 3
+
+    obj = parse_ftk2(modified)["json"]
+    things = obj["Entities"][0]["Components"]["CharacterComponent"]["Things"]
+    by_name = {entry["ConfigName"]: entry["_stackCount"] for entry in things}
+    assert by_name["HERB_HEALING"] == 10
+    assert by_name["TOOL_LOCKPICK"] == 10
+    assert by_name["DRINK_ALE"] == 10
+    assert by_name["POTION_SPEED"] == 3
+
+
+def test_ensure_character_herb_tool_minimum_not_gamerun(sample_save_bytes):
+    modified, ok, updated = ensure_character_herb_tool_minimum(
+        sample_save_bytes,
+        "hero-1",
+        minimum=10,
+    )
+    assert modified == sample_save_bytes
+    assert ok is False
+    assert updated == 0
 
 
 def test_verify_save_real_file():
