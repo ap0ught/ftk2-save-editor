@@ -12,6 +12,13 @@ dependencies = [
     "PySide6>=6.6",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "build>=1.0",
+    "twine>=5.0",
+]
+
 [project.scripts]
 ftk2-edit = "ftk2_editor.cli:main"
 ftk2-gui = "ftk2_editor.gui:main"
