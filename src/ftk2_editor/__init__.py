@@ -428,18 +428,33 @@ def _is_consumable(thing: dict[str, Any]) -> bool:
 
 def _run_party_characters(run: dict[str, Any]) -> list[dict[str, Any]]:
     """Party characters of a GameRun (player entities or companions)."""
+    if not isinstance(run, dict):
+        return []
     entities = run.get("Entities")
     if not isinstance(entities, list):
         return []
+    followers = run.get("PlayerFollowers")
+    follower_guids: set[str] = set()
+    if isinstance(followers, dict):
+        for info in followers.values():
+            if isinstance(info, dict):
+                guid = info.get("CharacterGuid") or info.get("Guid")
+                if isinstance(guid, str) and guid:
+                    follower_guids.add(guid)
     party: list[dict[str, Any]] = []
     for entity in entities:
-        comps = entity.get("Components") or {}
-        cc = comps.get("CharacterComponent") or {}
+        if not isinstance(entity, dict):
+            continue
+        comps = entity.get("Components")
+        if not isinstance(comps, dict):
+            continue
+        cc = comps.get("CharacterComponent")
         if not isinstance(cc, dict) or not isinstance(cc.get("Things"), list):
             continue
         has_player = isinstance(comps.get("PlayerComponent"), dict)
         ctype = str(cc.get("CharacterType") or "")
-        if has_player or ctype == "COMPANION":
+        is_follower = entity.get("Guid") in follower_guids
+        if has_player or is_follower or ctype in {"COMPANION", "MERCENARY"}:
             party.append(entity)
     return party
 
@@ -479,8 +494,8 @@ def carry_over_consumables(target: bytes, source: bytes) -> tuple[bytes, bool, i
     if not source_party:
         return target, False, 0
 
-    # Party-wide pool: ConfigName -> (total count, dominant holder class).
-    per_config: dict[str, list[tuple[str, int]]] = {}
+    # Party-wide pool: ConfigName -> (holder class, count, source prototype).
+    per_config: dict[str, list[tuple[str, int, dict[str, Any]]]] = {}
     for entity in source_party:
         cc = (entity.get("Components") or {}).get("CharacterComponent") or {}
         char_class = str(cc.get("ConfigName") or "")
@@ -494,10 +509,14 @@ def carry_over_consumables(target: bytes, source: bytes) -> tuple[bytes, bool, i
                 count = int(thing.get("_stackCount") or 0)
             except (TypeError, ValueError):
                 count = 0
-            per_config.setdefault(config, []).append((char_class, count))
+            per_config.setdefault(config, []).append((char_class, count, thing))
 
     pool = {
-        config: (sum(n for _, n in holders), max(holders, key=lambda h: h[1])[0])
+        config: (
+            sum(n for _, n, _ in holders),
+            max(holders, key=lambda h: h[1])[0],
+            max(holders, key=lambda h: h[1])[2],
+        )
         for config, holders in per_config.items()
     }
     if not pool:
@@ -508,7 +527,7 @@ def carry_over_consumables(target: bytes, source: bytes) -> tuple[bytes, bool, i
         return target, False, 0
 
     updated_entries = 0
-    for config, (amount, dominant_class) in sorted(pool.items()):
+    for config, (amount, dominant_class, prototype) in sorted(pool.items()):
         if amount <= 0:
             continue
         # Recipient: same class as dominant holder, else anyone holding it, else first member.
@@ -549,9 +568,9 @@ def carry_over_consumables(target: bytes, source: bytes) -> tuple[bytes, bool, i
                 {
                     "Id": str(uuid.uuid4()),
                     "ConfigName": config,
-                    "Type": "ITEM",
+                    "Type": str(prototype.get("Type") or "ITEM"),
                     "_stackCount": amount,
-                    "Expansion": "BASE",
+                    "Expansion": str(prototype.get("Expansion") or "BASE"),
                 }
             )
         updated_entries += 1

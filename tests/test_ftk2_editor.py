@@ -225,7 +225,12 @@ def source_run_bytes():
                     [
                         {"ConfigName": "HERB_HEALING", "Type": "ITEM", "_stackCount": 5},
                         {"ConfigName": "TOOL_LOCKPICK", "Type": "ITEM", "_stackCount": 3},
-                        {"ConfigName": "SCROLL_TELEPORT_01", "Type": "ITEM", "_stackCount": 2},
+                        {
+                            "ConfigName": "SCROLL_TELEPORT_01",
+                            "Type": "SPECIAL",
+                            "_stackCount": 2,
+                            "Expansion": "LORE_STORE",
+                        },
                     ],
                 ),
                 _char_entity(
@@ -286,6 +291,14 @@ def test_carry_over_consumables_roundtrip(source_run_bytes, target_run_bytes):
     # HERB + SCROLL land on the HUNTER (dominant class matches), added to existing/absent.
     assert by_entity["tgt-hunter"]["HERB_HEALING"] == 2 + 5
     assert by_entity["tgt-hunter"]["SCROLL_TELEPORT_01"] == 2
+    target_hunter = next(e for e in obj["Entities"] if e["Guid"] == "tgt-hunter")
+    scroll = next(
+        t
+        for t in target_hunter["Components"]["CharacterComponent"]["Things"]
+        if t["ConfigName"] == "SCROLL_TELEPORT_01"
+    )
+    assert scroll["Type"] == "SPECIAL"
+    assert scroll["Expansion"] == "LORE_STORE"
     # SAFETYSTONE dominant holder is BLACKSMITH in source -> a NEW safetystone entry on target BLACKSMITH.
     assert by_entity["tgt-blacksmith"]["MISC_SAFETYSTONE_01"] == 4
     # Target HUNTER's own pre-existing safetystone is untouched.
@@ -348,6 +361,20 @@ def test_carry_over_empty_source_noop(target_run_bytes):
     assert ok is True
     assert updated == 0
     assert modified == target_run_bytes
+
+
+@pytest.mark.parametrize("invalid_body", [[], None, "not-an-object"])
+def test_carry_over_rejects_non_object_run_json(target_run_bytes, source_run_bytes, invalid_body):
+    malformed = _run_blob(
+        invalid_body,
+        {"id": "malformed-run", "saveName": "Malformed", "difficulty": "normal"},
+    )
+
+    modified, ok, updated = carry_over_consumables(malformed, source_run_bytes)
+    assert (modified, ok, updated) == (malformed, False, 0)
+
+    modified, ok, updated = carry_over_consumables(target_run_bytes, malformed)
+    assert (modified, ok, updated) == (target_run_bytes, False, 0)
 
 
 def test_ensure_character_herb_tool_minimum_tops_up_thrown(sample_run_bytes):
