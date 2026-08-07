@@ -534,6 +534,15 @@ class MainWindow(QMainWindow):
                 return
             selected = table.selectionModel().selectedRows()
             if not selected:
+                options = replacement_item_configs(
+                    _replacement_catalog(), {}, same_type=False
+                )
+                if not options:
+                    replace_label.setText("Add from saved catalog: (no items found in saves)")
+                    return
+                replace_label.setText("Add from saved catalog:")
+                replace_combo.addItems(options)
+                add_btn.setEnabled(True)
                 return
             cell = table.item(selected[0].row(), 0)
             if cell is None:
@@ -556,6 +565,7 @@ class MainWindow(QMainWindow):
 
         table.itemSelectionChanged.connect(_refresh_replace_options)
         same_type_box.toggled.connect(_refresh_replace_options)
+        _refresh_replace_options()
 
         def _apply_replace() -> None:
             if not self._path or self._view is None or self._view.get("kind") != "run":

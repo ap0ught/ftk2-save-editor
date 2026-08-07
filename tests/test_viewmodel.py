@@ -239,6 +239,11 @@ def test_replacement_item_configs_filters_by_type_and_config_family():
         "BOW_FIRE_MEDIUM_01",
         "HERB_GODSBEARD",
     ]
+    assert vm.replacement_item_configs(catalog, {}, same_type=False) == [
+        "BLUNT_SHOVEL_HEAVY_00",
+        "BOW_FIRE_MEDIUM_01",
+        "HERB_GODSBEARD",
+    ]
 
 
 def test_run_display_name_uses_save_name(save):
