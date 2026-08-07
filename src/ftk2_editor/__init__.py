@@ -337,6 +337,7 @@ def add_character_thing(
     character_guid: str,
     config: str,
     thing_type: str,
+    expansion: str = "BASE",
 ) -> tuple[bytes, bool]:
     """Append an unequipped item to a run character's inventory."""
     plain = decrypt_ftk2_bytes(data)
@@ -348,7 +349,13 @@ def add_character_thing(
         run = json.loads(body_text)
     except json.JSONDecodeError:
         return data, False
-    if not isinstance(run, dict) or not character_guid or not config or not thing_type:
+    if (
+        not isinstance(run, dict)
+        or not character_guid
+        or not config
+        or not thing_type
+        or not expansion
+    ):
         return data, False
 
     entities = run.get("Entities")
@@ -374,7 +381,7 @@ def add_character_thing(
                 "ConfigName": config,
                 "Type": thing_type,
                 "_stackCount": 1,
-                "Expansion": "BASE",
+                "Expansion": expansion,
             }
         )
         new_body = _dump_json_matching_newlines(run, body_text)
@@ -453,12 +460,12 @@ def ensure_character_herb_tool_minimum(
     *,
     minimum: int = 10,
 ) -> tuple[bytes, bool, int]:
-    """Ensure a run character has at least *minimum* of herb/tool/drink/scroll stacks.
+    """Ensure a character has minimum consumable stacks, including safetystones and thrown items.
 
     Matches Things whose ``ConfigName`` contains HERB / TOOL / DRINK / SCROLL /
-    SAFETYSTONE (or whose ``Type`` is HERB / TOOL), topping each stack below
-    *minimum* up to *minimum*.  Returns ``(new_data, ok, updated_entries)`` where
-    ``ok`` means the character was found in a GameRun file.
+    SAFETYSTONE / THROW (or whose ``Type`` is HERB / TOOL), topping each stack
+    below *minimum* up to *minimum*.  Returns ``(new_data, ok, updated_entries)``
+    where ``ok`` means the character was found in a GameRun file.
     """
     if minimum < 0:
         raise ValueError("minimum must be >= 0")
@@ -494,15 +501,16 @@ def ensure_character_herb_tool_minimum(
                 continue
             config = str(thing.get("ConfigName") or "").upper()
             thing_type = str(thing.get("Type") or "").upper()
-            is_herb_or_tool = (
+            is_supported_consumable = (
                 "HERB" in config
                 or "TOOL" in config
                 or "DRINK" in config
                 or "SCROLL" in config
                 or "SAFETYSTONE" in config
+                or "THROW" in config
                 or thing_type in {"HERB", "TOOL"}
             )
-            if not is_herb_or_tool:
+            if not is_supported_consumable:
                 continue
             try:
                 count = int(thing.get("_stackCount") or 0)
@@ -520,6 +528,172 @@ def ensure_character_herb_tool_minimum(
 
     new_body = _dump_json_matching_newlines(run, body_text)
     new_plain = f"//**{summary_text}**//{joiner}{new_body}"
+    return encrypt_ftk2_text(new_plain), True, updated_entries
+
+
+CONSUMABLE_TOKENS = ("HERB", "DRINK", "TOOL", "SCROLL", "SAFETYSTONE")
+
+
+def _is_consumable(thing: dict[str, Any]) -> bool:
+    """True for non-equipment, non-currency, non-XP consumables (herbs, drinks, tools, scrolls, safetystones)."""
+    config = str(thing.get("ConfigName") or "").upper()
+    thing_type = str(thing.get("Type") or "").upper()
+    if thing_type in {"EQUIPMENT", "PASSIVE"} or config == "CURRENCY_ADVENTURE":
+        return False
+    return any(token in config for token in CONSUMABLE_TOKENS) or thing_type in {"HERB", "TOOL"}
+
+
+def _run_party_characters(run: dict[str, Any]) -> list[dict[str, Any]]:
+    """Party characters of a GameRun (player entities or companions)."""
+    if not isinstance(run, dict):
+        return []
+    entities = run.get("Entities")
+    if not isinstance(entities, list):
+        return []
+    followers = run.get("PlayerFollowers")
+    follower_guids: set[str] = set()
+    if isinstance(followers, dict):
+        for info in followers.values():
+            if isinstance(info, dict):
+                guid = info.get("CharacterGuid") or info.get("Guid")
+                if isinstance(guid, str) and guid:
+                    follower_guids.add(guid)
+    party: list[dict[str, Any]] = []
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        comps = entity.get("Components")
+        if not isinstance(comps, dict):
+            continue
+        cc = comps.get("CharacterComponent")
+        if not isinstance(cc, dict) or not isinstance(cc.get("Things"), list):
+            continue
+        has_player = isinstance(comps.get("PlayerComponent"), dict)
+        ctype = str(cc.get("CharacterType") or "")
+        is_follower = entity.get("Guid") in follower_guids
+        if has_player or is_follower or ctype in {"COMPANION", "MERCENARY"}:
+            party.append(entity)
+    return party
+
+
+def carry_over_consumables(target: bytes, source: bytes) -> tuple[bytes, bool, int]:
+    """Carry consumables from *source* (a previous act's GameRun) onto *target*'s party.
+
+    Sums each consumable (herb/drink/tool/scroll/safetystone) party-wide in the
+    source save, then adds the total onto the target party's matching stack —
+    preferring the same character class as the dominant holder, then any member
+    that already holds the item, then the first party member.  Equipment, gold
+    (``CURRENCY_ADVENTURE``) and XP (``PASSIVE``) are never copied.
+
+    Returns ``(new_target_bytes, ok, updated_entries)`` where ``ok`` means both
+    inputs were GameRun saves with a non-empty party.
+    """
+    plain = decrypt_ftk2_bytes(target)
+    parts = _split_gamerun_plain(plain)
+    if parts is None:
+        return target, False, 0
+    target_summary, target_body, joiner = parts
+    try:
+        target_run = json.loads(target_body)
+    except json.JSONDecodeError:
+        return target, False, 0
+
+    source_plain = decrypt_ftk2_bytes(source)
+    source_parts = _split_gamerun_plain(source_plain)
+    if source_parts is None:
+        return target, False, 0
+    try:
+        source_run = json.loads(source_parts[1])
+    except json.JSONDecodeError:
+        return target, False, 0
+
+    source_party = _run_party_characters(source_run)
+    if not source_party:
+        return target, False, 0
+
+    # Party-wide pool: ConfigName -> (holder class, count, source prototype).
+    per_config: dict[str, list[tuple[str, int, dict[str, Any]]]] = {}
+    for entity in source_party:
+        cc = (entity.get("Components") or {}).get("CharacterComponent") or {}
+        char_class = str(cc.get("ConfigName") or "")
+        for thing in cc.get("Things") or []:
+            if not isinstance(thing, dict) or not _is_consumable(thing):
+                continue
+            config = str(thing.get("ConfigName") or "")
+            if not config:
+                continue
+            try:
+                count = int(thing.get("_stackCount") or 0)
+            except (TypeError, ValueError):
+                count = 0
+            per_config.setdefault(config, []).append((char_class, count, thing))
+
+    pool = {
+        config: (
+            sum(n for _, n, _ in holders),
+            max(holders, key=lambda h: h[1])[0],
+            max(holders, key=lambda h: h[1])[2],
+        )
+        for config, holders in per_config.items()
+    }
+    if not pool:
+        return target, True, 0
+
+    target_party = _run_party_characters(target_run)
+    if not target_party:
+        return target, False, 0
+
+    updated_entries = 0
+    for config, (amount, dominant_class, prototype) in sorted(pool.items()):
+        if amount <= 0:
+            continue
+        # Recipient: same class as dominant holder, else anyone holding it, else first member.
+        recipient: dict[str, Any] | None = None
+        for entity in target_party:
+            cc = (entity.get("Components") or {}).get("CharacterComponent") or {}
+            if str(cc.get("ConfigName") or "") == dominant_class:
+                recipient = entity
+                break
+        if recipient is None:
+            for entity in target_party:
+                cc = (entity.get("Components") or {}).get("CharacterComponent") or {}
+                if any(
+                    isinstance(t, dict) and t.get("ConfigName") == config
+                    for t in cc.get("Things") or []
+                ):
+                    recipient = entity
+                    break
+        if recipient is None:
+            recipient = target_party[0]
+
+        cc = (recipient.get("Components") or {}).setdefault("CharacterComponent", {})
+        things = cc.setdefault("Things", [])
+        if not isinstance(things, list):
+            return target, False, 0
+        existing = None
+        for thing in things:
+            if isinstance(thing, dict) and thing.get("ConfigName") == config:
+                existing = thing
+                break
+        if existing is not None:
+            try:
+                existing["_stackCount"] = int(existing.get("_stackCount") or 0) + amount
+            except (TypeError, ValueError):
+                existing["_stackCount"] = amount
+        else:
+            things.append(
+                {
+                    "Id": str(uuid.uuid4()),
+                    "ConfigName": config,
+                    "Type": str(prototype.get("Type") or "ITEM"),
+                    "_stackCount": amount,
+                    "Expansion": str(prototype.get("Expansion") or "BASE"),
+                }
+            )
+        updated_entries += 1
+
+    new_body = _dump_json_matching_newlines(target_run, target_body)
+    new_plain = f"//**{target_summary}**//{joiner}{new_body}"
     return encrypt_ftk2_text(new_plain), True, updated_entries
 
 

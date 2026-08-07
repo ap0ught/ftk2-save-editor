@@ -42,15 +42,18 @@ from ftk2_editor import (
     FTK2_GAME_DIR,
     add_character_thing,
     backup,
+    carry_over_consumables,
     decrypt_ftk2_bytes,
     ensure_character_herb_tool_minimum,
     replace_character_thing,
     set_character_gold,
 )
 from ftk2_editor.viewmodel import (
+    find_carryover_source,
     list_save_candidates,
     load_save_view,
     replacement_item_configs,
+    run_display_name,
     unique_saved_items,
 )
 
@@ -257,13 +260,20 @@ class MainWindow(QMainWindow):
         self.inventory_label.setStyleSheet("color: #9aa3ad;")
         inv_layout.addWidget(self.inventory_label)
         inv_action_row = QHBoxLayout()
-        self.topup_herb_tool_btn = QPushButton("Set herbs/tools/drinks/scrolls/safetystones to min 10")
+        self.topup_herb_tool_btn = QPushButton("Set herbs/tools/drinks/scrolls/safetystones/thrown to min 10")
         self.topup_herb_tool_btn.setEnabled(False)
         self.topup_herb_tool_btn.setToolTip(
-            "For selected character, set every herb/tool/drink/scroll/safetystone stack below 10 up to 10"
+            "For selected character, set every herb/tool/drink/scroll/safetystone/thrown stack below 10 up to 10"
         )
         self.topup_herb_tool_btn.clicked.connect(self.apply_inventory_herb_tool_topup)
         inv_action_row.addWidget(self.topup_herb_tool_btn)
+        self.carry_over_btn = QPushButton("Carry over consumables from last act")
+        self.carry_over_btn.setEnabled(False)
+        self.carry_over_btn.setToolTip(
+            "Add the herbs/drinks/tools/scrolls/safetystones from the previous act's most recent save onto this party"
+        )
+        self.carry_over_btn.clicked.connect(self.apply_carry_over_consumables)
+        inv_action_row.addWidget(self.carry_over_btn)
         inv_action_row.addStretch(1)
         inv_layout.addLayout(inv_action_row)
         self.inventory_table = QTableWidget(0, 3)
@@ -412,6 +422,7 @@ class MainWindow(QMainWindow):
             self._pending_select_guid = None
         if not selected:
             self._populate_inventory(None)
+            self._set_inventory_controls_enabled(False)
         if selected and self._pending_focus_inventory:
             self.tabs.setCurrentWidget(self.inventory_tab)
         self._pending_focus_inventory = False
@@ -632,6 +643,7 @@ class MainWindow(QMainWindow):
                     str(guid),
                     config,
                     str(catalog_item.get("type") or "ITEM"),
+                    str(catalog_item.get("expansion") or "BASE"),
                 )
                 if not ok:
                     QMessageBox.critical(self, APP_TITLE, "Could not find that character in the run.")
@@ -770,6 +782,8 @@ class MainWindow(QMainWindow):
 
     def _set_inventory_controls_enabled(self, enabled: bool) -> None:
         self.topup_herb_tool_btn.setEnabled(enabled)
+        can_carry_over = self._view is not None and self._view.get("kind") == "run"
+        self.carry_over_btn.setEnabled(can_carry_over)
 
     def _selected_party_row(self) -> dict[str, Any] | None:
         rows = self.party_table.selectionModel().selectedRows()
@@ -944,7 +958,7 @@ class MainWindow(QMainWindow):
         reply = QMessageBox.question(
             self,
             APP_TITLE,
-            f"Set all herb/tool/drink/scroll/safetystone stacks below 10 to 10 for {row.get('name')}?\n\n"
+            f"Set all herb/tool/drink/scroll/safetystone/thrown stacks below 10 to 10 for {row.get('name')}?\n\n"
             f"File: {self._path}\n"
             "A .bak backup will be created if changes are needed."
             " Quit the game first if it is running.",
@@ -965,17 +979,75 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(
                     self,
                     APP_TITLE,
-                    f"No herb/tool/drink/scroll/safetystone stacks below 10 for {row.get('name')}.",
+                    f"No herb/tool/drink/scroll/safetystone/thrown stacks below 10 for {row.get('name')}.",
                 )
                 return
 
             bak = backup(self._path)
             self._path.write_bytes(modified)
             self.statusBar().showMessage(
-                f"Updated {updated} herb/tool/drink/scroll/safetystone stacks for {row.get('name')} (backup {bak.name})"
+                f"Updated {updated} herb/tool/drink/scroll/safetystone/thrown stacks for {row.get('name')} (backup {bak.name})"
             )
             self._pending_select_guid = str(guid)
             self._pending_focus_inventory = True
+            self.load_path(self._path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, APP_TITLE, f"Save failed:\n{exc}")
+
+    def apply_carry_over_consumables(self) -> None:
+        if not self._path or not self._view or self._view.get("kind") != "run":
+            QMessageBox.warning(
+                self,
+                APP_TITLE,
+                "Open a GameRuns/*.ftk2 expedition save to carry consumables onto it.",
+            )
+            return
+        source = find_carryover_source(self._path)
+        if source is None:
+            QMessageBox.information(
+                self,
+                APP_TITLE,
+                "No other run save found on disk to carry consumables from.\n\n"
+                "This feature copies herbs/drinks/tools/scrolls/safetystones from the most recent save of a different act.",
+            )
+            return
+
+        source_name = run_display_name(source)
+        reply = QMessageBox.question(
+            self,
+            APP_TITLE,
+            f"Add the herbs/drinks/tools/scrolls/safetystones from\n{source_name} ({source.name})\n"
+            f"onto the party of {run_display_name(self._path)}?\n\n"
+            "Equipment, gold and XP are not copied.\n"
+            "A .bak backup will be created if changes are needed.\n"
+            "Quit the game first if it is running.",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            target = self._path.read_bytes()
+            source_data = source.read_bytes()
+            modified, ok, updated = carry_over_consumables(target, source_data)
+            if not ok:
+                QMessageBox.critical(
+                    self,
+                    APP_TITLE,
+                    "Could not read both saves as expedition runs with a party.",
+                )
+                return
+            if updated == 0:
+                QMessageBox.information(
+                    self,
+                    APP_TITLE,
+                    "No consumables found in the other act's save to carry over.",
+                )
+                return
+
+            bak = backup(self._path)
+            self._path.write_bytes(modified)
+            self.statusBar().showMessage(
+                f"Carried over {updated} consumable entries from {source.name} (backup {bak.name})"
+            )
             self.load_path(self._path)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, APP_TITLE, f"Save failed:\n{exc}")

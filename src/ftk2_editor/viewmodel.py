@@ -40,6 +40,7 @@ def character_from_entity(entity: dict[str, Any]) -> dict[str, Any] | None:
         {
             "config": t.get("ConfigName"),
             "type": t.get("Type"),
+            "expansion": t.get("Expansion"),
             "count": t.get("_stackCount"),
             "id": t.get("Id"),
         }
@@ -194,7 +195,7 @@ def unique_saved_items() -> list[dict[str, str]]:
     paths = ([USER_SAVE] if USER_SAVE.exists() else []) + [
         item["path"] for item in list_save_candidates()
     ]
-    catalog: dict[str, str] = {}
+    catalog: dict[str, tuple[str, str]] = {}
     for path in paths:
         try:
             obj = parse_ftk2(path.read_bytes()).get("json") or {}
@@ -204,12 +205,15 @@ def unique_saved_items() -> list[dict[str, str]]:
                     config = item.get("config")
                     item_type = item.get("type")
                     if config and item_type:
-                        catalog.setdefault(str(config), str(item_type))
+                        catalog.setdefault(
+                            str(config),
+                            (str(item_type), str(item.get("expansion") or "BASE")),
+                        )
         except Exception:
             continue
     return [
-        {"config": config, "type": item_type}
-        for config, item_type in sorted(catalog.items())
+        {"config": config, "type": metadata[0], "expansion": metadata[1]}
+        for config, metadata in sorted(catalog.items())
     ]
 
 
@@ -234,6 +238,65 @@ def list_save_candidates() -> list[dict[str, Any]]:
             )
         # Also include newest numbered slots that have a saveName-worthy size? skip for noise
     return items
+
+
+def run_display_name(path: Path) -> str:
+    """Human-readable name for a GameRun save: its ``saveName`` when parseable, else the filename."""
+    path = Path(path)
+    try:
+        summary = parse_ftk2(path.read_bytes()).get("summary") or {}
+        name = summary.get("saveName")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    except Exception:  # noqa: BLE001 - name is cosmetic; fall back to filename
+        pass
+    return path.name
+
+
+def find_carryover_source(current: Path) -> Path | None:
+    """Locate the most recent save slot of a *different* run (the previous act).
+
+    Given the currently-open save, scan all ``GameRuns`` *.ftk2 files, group them
+    by run id (filename stem before any trailing ``-N``), pick the most-recently
+    modified run other than ``current``'s own run, and return its newest slot (or
+    the bare file if no numbered slots exist).  Returns ``None`` when there is no
+    other run on disk.
+    """
+    current = Path(current)
+    files = list(GAME_RUNS_DIR.glob("*.ftk2")) if GAME_RUNS_DIR.exists() else []
+    if not files:
+        return None
+
+    current_run = _run_key(current)
+    by_run: dict[str, list[Path]] = {}
+    for p in files:
+        key = _run_key(p)
+        if key == current_run:
+            continue
+        by_run.setdefault(key, []).append(p)
+
+    if not by_run:
+        return None
+
+    # Newest run = the one with the latest mtime among its newest slot.
+    def newest_of(paths: list[Path]) -> tuple[float, Path]:
+        best = max(paths, key=lambda p: p.stat().st_mtime)
+        return best.stat().st_mtime, best
+
+    candidate_runs = sorted(
+        (newest_of(paths) for paths in by_run.values()),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    return candidate_runs[0][1]
+
+
+def _run_key(path: Path) -> str:
+    """Stable run id: strip a trailing ``-N`` slot suffix (all-digit segment)."""
+    stem = path.stem
+    if stem.rsplit("-", 1)[-1].isdigit():
+        stem = stem.rsplit("-", 1)[0]
+    return stem
 
 
 def load_save_view(path: Path) -> dict[str, Any]:
@@ -291,6 +354,26 @@ def load_save_view(path: Path) -> dict[str, Any]:
         all_rows = party_from_entities(obj.get("Entities") or [], standard_only=False)
         party = party_from_run(obj, preferred_guids=preferred)
         party_guids = {row.get("guid") for row in party if row.get("guid")}
+        # Followers (COMPANION/MERCENARY) rented or carried per-party-member are
+        # legitimate editable rows; surface them alongside the main heroes.
+        followers = obj.get("PlayerFollowers") if isinstance(obj, dict) else None
+        if isinstance(followers, dict):
+            follower_guids = {
+                str(info.get("FollowerID"))
+                for info in followers.values()
+                if isinstance(info, dict) and info.get("FollowerID")
+            }
+            if follower_guids:
+                follower_rows = party_from_entities(
+                    obj.get("Entities") or [],
+                    guids=follower_guids,
+                    standard_only=False,
+                )
+                for row in follower_rows:
+                    guid = row.get("guid")
+                    if guid and guid not in party_guids:
+                        party.append(row)
+                        party_guids.add(guid)
         non_party = [
             row
             for row in all_rows
