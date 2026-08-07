@@ -306,6 +306,53 @@ def test_item_mutations_reject_non_object_run_json(body):
     assert added == blob
 
 
+def test_replace_character_thing_rejects_duplicate_character_guids():
+    """Fail-closed when Entities contains duplicate character GUIDs."""
+    run = {
+        "Entities": [
+            _char_entity("hero-1", "HUNTER", [{"ConfigName": "BOW_X", "Type": "EQUIPMENT", "_stackCount": 1, "Id": "bow-1"}]),
+            _char_entity("hero-1", "MAGE", [{"ConfigName": "STAFF_Y", "Type": "EQUIPMENT", "_stackCount": 1, "Id": "staff-1"}]),
+        ]
+    }
+    summary = {"runID": "run-123", "saveName": "Test"}
+    blob = _run_blob(run, summary)
+    modified, ok = replace_character_thing(blob, "hero-1", "bow-1", "BOW_Z")
+    assert ok is False
+    assert modified == blob
+
+
+def test_replace_character_thing_rejects_duplicate_thing_ids():
+    """Fail-closed when Things contains duplicate Thing IDs for the target character."""
+    run = {
+        "Entities": [
+            _char_entity("hero-1", "HUNTER", [
+                {"ConfigName": "BOW_X", "Type": "EQUIPMENT", "_stackCount": 1, "Id": "bow-1"},
+                {"ConfigName": "BOW_Y", "Type": "EQUIPMENT", "_stackCount": 1, "Id": "bow-1"},
+            ]),
+        ]
+    }
+    summary = {"runID": "run-123", "saveName": "Test"}
+    blob = _run_blob(run, summary)
+    modified, ok = replace_character_thing(blob, "hero-1", "bow-1", "BOW_Z")
+    assert ok is False
+    assert modified == blob
+
+
+def test_add_character_thing_rejects_duplicate_character_guids():
+    """Fail-closed when Entities contains duplicate character GUIDs."""
+    run = {
+        "Entities": [
+            _char_entity("hero-1", "HUNTER", [{"ConfigName": "BOW_X", "Type": "EQUIPMENT", "_stackCount": 1, "Id": "bow-1"}]),
+            _char_entity("hero-1", "MAGE", [{"ConfigName": "STAFF_Y", "Type": "EQUIPMENT", "_stackCount": 1, "Id": "staff-1"}]),
+        ]
+    }
+    summary = {"runID": "run-123", "saveName": "Test"}
+    blob = _run_blob(run, summary)
+    modified, ok = editor.add_character_thing(blob, "hero-1", "BOW_FIRE_MEDIUM_01", "EQUIPMENT")
+    assert ok is False
+    assert modified == blob
+
+
 def _run_blob(run: dict, summary: dict) -> bytes:
     text = f"//**{json.dumps(summary)}**//\n{json.dumps(run, indent=2)}\n"
     return encrypt_ftk2_text(text)

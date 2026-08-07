@@ -279,11 +279,12 @@ def replace_character_thing(
     thing_id: str,
     new_config: str,
 ) -> tuple[bytes, bool]:
-    """Replace a run character's item (Thing) with another item config.
+    """Replace a Thing's ConfigName in a run character's inventory.
 
-    Only swaps ``ConfigName`` on the Thing matching *thing_id* — the Id,
-    Type, stack count and equipped-slot wiring stay intact.  Returns
-    ``(new_data, ok)``; ``ok`` False if the character/Thing was not found.
+    Fail-closed: returns (data, False) if run structure is invalid,
+    if character_guid/thing_id/new_config are empty, if Entities contains
+    non-object entries, or if there are duplicate character GUIDs or
+    duplicate Thing IDs for the target character.
     """
     plain = decrypt_ftk2_bytes(data)
     parts = _split_gamerun_plain(plain)
@@ -301,33 +302,40 @@ def replace_character_thing(
     if not isinstance(entities, list):
         return data, False
 
-    found = False
-    for entity in entities:
-        if not isinstance(entity, dict):
-            continue
-        if entity.get("Guid") != character_guid:
-            continue
-        comps = entity.get("Components")
-        if not isinstance(comps, dict):
+    # Fail-closed: no non-object entries in Entities
+    for e in entities:
+        if not isinstance(e, dict):
             return data, False
-        cc = comps.get("CharacterComponent")
-        if not isinstance(cc, dict):
-            return data, False
-        things = cc.get("Things")
-        if not isinstance(things, list):
-            return data, False
-        for thing in things:
-            if isinstance(thing, dict) and thing.get("Id") == thing_id:
-                thing["ConfigName"] = new_config
-                found = True
-                break
-        break
 
-    if not found:
+    # Find matching character (fail if duplicate GUIDs)
+    matching_chars = [e for e in entities if e.get("Guid") == character_guid]
+    if len(matching_chars) != 1:
+        return data, False
+    entity = matching_chars[0]
+
+    comps = entity.get("Components")
+    if not isinstance(comps, dict):
+        return data, False
+    cc = comps.get("CharacterComponent")
+    if not isinstance(cc, dict):
+        return data, False
+    things = cc.get("Things")
+    if not isinstance(things, list):
         return data, False
 
+    # Fail-closed: no non-object entries in Things
+    for t in things:
+        if not isinstance(t, dict):
+            return data, False
+
+    # Find matching thing (fail if duplicate Thing IDs)
+    matching_things = [t for t in things if t.get("Id") == thing_id]
+    if len(matching_things) != 1:
+        return data, False
+
+    matching_things[0]["ConfigName"] = new_config
+
     new_body = _dump_json_matching_newlines(run, body_text)
-    # Keep summary bytes unchanged when possible (avoid reformatting)
     new_plain = f"//**{summary_text}**//{joiner}{new_body}"
     return encrypt_ftk2_text(new_plain), True
 
@@ -339,7 +347,12 @@ def add_character_thing(
     thing_type: str,
     expansion: str = "BASE",
 ) -> tuple[bytes, bool]:
-    """Append an unequipped item to a run character's inventory."""
+    """Append an unequipped item to a run character's inventory.
+
+    Fail-closed: returns (data, False) if run structure is invalid,
+    if character_guid/config/thing_type/expansion are empty, if Entities
+    contains non-object entries, or if there are duplicate character GUIDs.
+    """
     plain = decrypt_ftk2_bytes(data)
     parts = _split_gamerun_plain(plain)
     if parts is None:
@@ -361,33 +374,45 @@ def add_character_thing(
     entities = run.get("Entities")
     if not isinstance(entities, list):
         return data, False
-    for entity in entities:
-        if not isinstance(entity, dict):
-            continue
-        if entity.get("Guid") != character_guid:
-            continue
-        comps = entity.get("Components")
-        if not isinstance(comps, dict):
+
+    # Fail-closed: no non-object entries in Entities
+    for e in entities:
+        if not isinstance(e, dict):
             return data, False
-        cc = comps.get("CharacterComponent")
-        if not isinstance(cc, dict):
+
+    # Find matching character (fail if duplicate GUIDs)
+    matching_chars = [e for e in entities if e.get("Guid") == character_guid]
+    if len(matching_chars) != 1:
+        return data, False
+    entity = matching_chars[0]
+
+    comps = entity.get("Components")
+    if not isinstance(comps, dict):
+        return data, False
+    cc = comps.get("CharacterComponent")
+    if not isinstance(cc, dict):
+        return data, False
+    things = cc.get("Things")
+    if not isinstance(things, list):
+        return data, False
+
+    # Fail-closed: no non-object entries in Things
+    for t in things:
+        if not isinstance(t, dict):
             return data, False
-        things = cc.get("Things")
-        if not isinstance(things, list):
-            return data, False
-        things.append(
-            {
-                "Id": str(uuid.uuid4()),
-                "ConfigName": config,
-                "Type": thing_type,
-                "_stackCount": 1,
-                "Expansion": expansion,
-            }
-        )
-        new_body = _dump_json_matching_newlines(run, body_text)
-        new_plain = f"//**{summary_text}**//{joiner}{new_body}"
-        return encrypt_ftk2_text(new_plain), True
-    return data, False
+
+    things.append(
+        {
+            "Id": str(uuid.uuid4()),
+            "ConfigName": config,
+            "Type": thing_type,
+            "_stackCount": 1,
+            "Expansion": expansion,
+        }
+    )
+    new_body = _dump_json_matching_newlines(run, body_text)
+    new_plain = f"//**{summary_text}**//{joiner}{new_body}"
+    return encrypt_ftk2_text(new_plain), True
 
 
 def set_character_gold(
@@ -544,7 +569,11 @@ def _is_consumable(thing: dict[str, Any]) -> bool:
 
 
 def _run_party_characters(run: dict[str, Any]) -> list[dict[str, Any]]:
-    """Party characters of a GameRun (player entities or companions)."""
+    """Party characters of a GameRun (player entities or companions).
+
+    Includes players, companions, and mercenary followers from PlayerFollowers.
+    Returns empty list for non-dict runs (fail-closed for malformed data).
+    """
     if not isinstance(run, dict):
         return []
     entities = run.get("Entities")
@@ -555,7 +584,8 @@ def _run_party_characters(run: dict[str, Any]) -> list[dict[str, Any]]:
     if isinstance(followers, dict):
         for info in followers.values():
             if isinstance(info, dict):
-                guid = info.get("CharacterGuid") or info.get("Guid")
+                # Match viewmodel.py: primary key is FollowerID, fallback to CharacterGuid/Guid
+                guid = info.get("FollowerID") or info.get("CharacterGuid") or info.get("Guid")
                 if isinstance(guid, str) and guid:
                     follower_guids.add(guid)
     party: list[dict[str, Any]] = []

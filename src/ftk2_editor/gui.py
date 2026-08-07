@@ -455,6 +455,8 @@ class MainWindow(QMainWindow):
 
     def _open_inventory_window(self, row: dict[str, Any], *, title_prefix: str) -> None:
         inventory = row.get("inventory") or []
+        # Capture GUID at dialog creation to avoid stale reference if main window selection changes
+        character_guid = str(row.get("guid") or "")
         dialog = QDialog(self)
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         dialog.setWindowTitle(f"{title_prefix}: {row.get('name')}")
@@ -516,7 +518,7 @@ class MainWindow(QMainWindow):
             self._path is not None
             and self._view is not None
             and self._view.get("kind") == "run"
-            and bool(row.get("guid"))
+            and bool(character_guid)
         )
 
         def _replacement_catalog() -> list[dict[str, Any]]:
@@ -585,7 +587,7 @@ class MainWindow(QMainWindow):
                 return
             thing_id = entry.get("id")
             new_config = replace_combo.currentText()
-            guid = row.get("guid")
+            guid = character_guid
             if not guid:
                 QMessageBox.warning(self, APP_TITLE, "That inventory row has no character ID.")
                 return
@@ -628,7 +630,7 @@ class MainWindow(QMainWindow):
                 )
                 return
             config = replace_combo.currentText()
-            guid = row.get("guid")
+            guid = character_guid
             if not guid:
                 QMessageBox.warning(self, APP_TITLE, "That inventory row has no character ID.")
                 return

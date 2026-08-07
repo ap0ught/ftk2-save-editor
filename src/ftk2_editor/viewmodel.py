@@ -190,12 +190,12 @@ def replacement_item_configs(
     return sorted(configs)
 
 
-def unique_saved_items() -> list[dict[str, str]]:
+def unique_saved_items() -> list[dict[str, str | None]]:
     """Return unique carried items found across User and each main run save."""
     paths = ([USER_SAVE] if USER_SAVE.exists() else []) + [
         item["path"] for item in list_save_candidates()
     ]
-    catalog: dict[str, tuple[str, str]] = {}
+    catalog: dict[str, tuple[str, str, str | None]] = {}
     for path in paths:
         try:
             obj = parse_ftk2(path.read_bytes()).get("json") or {}
@@ -204,15 +204,22 @@ def unique_saved_items() -> list[dict[str, str]]:
                 for item in row.get("inventory") or []:
                     config = item.get("config")
                     item_type = item.get("type")
+                    expansion = item.get("expansion") or "BASE"
+                    custom_data = item.get("custom_data")
                     if config and item_type:
                         catalog.setdefault(
                             str(config),
-                            (str(item_type), str(item.get("expansion") or "BASE")),
+                            (str(item_type), str(expansion), custom_data),
                         )
         except Exception:
             continue
     return [
-        {"config": config, "type": metadata[0], "expansion": metadata[1]}
+        {
+            "config": config,
+            "type": metadata[0],
+            "expansion": metadata[1],
+            "custom_data": metadata[2],
+        }
         for config, metadata in sorted(catalog.items())
     ]
 
