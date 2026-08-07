@@ -206,3 +206,16 @@ def test_followers_surface_in_party(save):
     np_guids = {row.get("guid") for row in view["non_party"]}
     assert "follower-1" not in np_guids
     assert "follower-2" not in np_guids
+
+
+def test_malformed_player_followers_shape_is_ignored(save):
+    run = _make_run()
+    run["PlayerFollowers"] = ["not", "a", "mapping"]
+    _write_ftk2(save["run"], run, run=True)
+
+    view = vm.load_save_view(save["run"])
+
+    assert all(
+        row.get("guid") not in {"follower-1", "follower-2"}
+        for row in view["party"]
+    )

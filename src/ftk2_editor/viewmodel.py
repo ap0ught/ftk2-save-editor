@@ -243,10 +243,11 @@ def load_save_view(path: Path) -> dict[str, Any]:
         party_guids = {row.get("guid") for row in party if row.get("guid")}
         # Followers (COMPANION/MERCENARY) rented or carried per-party-member are
         # legitimate editable rows; surface them alongside the main heroes.
-        try:
+        followers = obj.get("PlayerFollowers") if isinstance(obj, dict) else None
+        if isinstance(followers, dict):
             follower_guids = {
                 str(info.get("FollowerID"))
-                for info in (obj.get("PlayerFollowers") or {}).values()
+                for info in followers.values()
                 if isinstance(info, dict) and info.get("FollowerID")
             }
             if follower_guids:
@@ -260,8 +261,6 @@ def load_save_view(path: Path) -> dict[str, Any]:
                     if guid and guid not in party_guids:
                         party.append(row)
                         party_guids.add(guid)
-        except Exception:
-            pass
         non_party = [
             row
             for row in all_rows
