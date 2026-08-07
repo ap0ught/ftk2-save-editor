@@ -241,6 +241,26 @@ def load_save_view(path: Path) -> dict[str, Any]:
         all_rows = party_from_entities(obj.get("Entities") or [], standard_only=False)
         party = party_from_run(obj, preferred_guids=preferred)
         party_guids = {row.get("guid") for row in party if row.get("guid")}
+        # Followers (COMPANION/MERCENARY) rented or carried per-party-member are
+        # legitimate editable rows; surface them alongside the main heroes.
+        followers = obj.get("PlayerFollowers") if isinstance(obj, dict) else None
+        if isinstance(followers, dict):
+            follower_guids = {
+                str(info.get("FollowerID"))
+                for info in followers.values()
+                if isinstance(info, dict) and info.get("FollowerID")
+            }
+            if follower_guids:
+                follower_rows = party_from_entities(
+                    obj.get("Entities") or [],
+                    guids=follower_guids,
+                    standard_only=False,
+                )
+                for row in follower_rows:
+                    guid = row.get("guid")
+                    if guid and guid not in party_guids:
+                        party.append(row)
+                        party_guids.add(guid)
         non_party = [
             row
             for row in all_rows
