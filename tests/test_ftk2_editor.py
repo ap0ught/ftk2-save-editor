@@ -484,6 +484,32 @@ def test_carry_over_rejects_non_object_run_json(target_run_bytes, source_run_byt
     assert (modified, ok, updated) == (target_run_bytes, False, 0)
 
 
+def test_carry_over_empty_source_rejects_invalid_target(target_run_bytes):
+    """Valid source with no consumables must still reject a target with no party."""
+    empty_source = _run_blob(
+        {
+            "Entities": [
+                _char_entity(
+                    "a",
+                    "HUNTER",
+                    [
+                        {"ConfigName": "WEAPON_SWORD", "Type": "EQUIPMENT", "_stackCount": 1},
+                        {"ConfigName": "CURRENCY_ADVENTURE", "_stackCount": 999},
+                    ],
+                )
+            ]
+        },
+        {"id": "empty-source", "saveName": "Empty", "difficulty": "normal"},
+    )
+    # Target with empty Entities -> no party
+    invalid_target = _run_blob(
+        {"Entities": []},
+        {"id": "invalid-target", "saveName": "Invalid", "difficulty": "normal"},
+    )
+    modified, ok, updated = carry_over_consumables(invalid_target, empty_source)
+    assert (modified, ok, updated) == (invalid_target, False, 0)
+
+
 def test_ensure_character_herb_tool_minimum_tops_up_thrown(sample_run_bytes):
     # THROW_ configs (Type=EQUIPMENT) must now be topped up to the minimum too.
     run = parse_ftk2(sample_run_bytes)["json"]

@@ -636,12 +636,13 @@ def carry_over_consumables(target: bytes, source: bytes) -> tuple[bytes, bool, i
         )
         for config, holders in per_config.items()
     }
-    if not pool:
-        return target, True, 0
 
     target_party = _run_party_characters(target_run)
     if not target_party:
         return target, False, 0
+
+    if not pool:
+        return target, True, 0
 
     updated_entries = 0
     for config, (amount, dominant_class, prototype) in sorted(pool.items()):
