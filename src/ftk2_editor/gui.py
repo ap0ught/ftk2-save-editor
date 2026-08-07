@@ -744,7 +744,7 @@ class MainWindow(QMainWindow):
         reply = QMessageBox.question(
             self,
             APP_TITLE,
-            f"Set all herb/tool/drink/scroll/safetystone stacks below 10 to 10 for {row.get('name')}?\n\n"
+            f"Set all herb/tool/drink/scroll/safetystone/thrown stacks below 10 to 10 for {row.get('name')}?\n\n"
             f"File: {self._path}\n"
             "A .bak backup will be created if changes are needed."
             " Quit the game first if it is running.",
@@ -765,14 +765,14 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(
                     self,
                     APP_TITLE,
-                    f"No herb/tool/drink/scroll/safetystone stacks below 10 for {row.get('name')}.",
+                    f"No herb/tool/drink/scroll/safetystone/thrown stacks below 10 for {row.get('name')}.",
                 )
                 return
 
             bak = backup(self._path)
             self._path.write_bytes(modified)
             self.statusBar().showMessage(
-                f"Updated {updated} herb/tool/drink/scroll/safetystone stacks for {row.get('name')} (backup {bak.name})"
+                f"Updated {updated} herb/tool/drink/scroll/safetystone/thrown stacks for {row.get('name')} (backup {bak.name})"
             )
             self._pending_select_guid = str(guid)
             self._pending_focus_inventory = True

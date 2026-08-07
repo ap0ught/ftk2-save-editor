@@ -343,7 +343,7 @@ def ensure_character_herb_tool_minimum(
     *,
     minimum: int = 10,
 ) -> tuple[bytes, bool, int]:
-    """Ensure a run character has at least *minimum* of herb/tool/drink/scroll/thrown stacks.
+    """Ensure a character has minimum consumable stacks, including safetystones and thrown items.
 
     Matches Things whose ``ConfigName`` contains HERB / TOOL / DRINK / SCROLL /
     SAFETYSTONE / THROW (or whose ``Type`` is HERB / TOOL), topping each stack
@@ -384,7 +384,7 @@ def ensure_character_herb_tool_minimum(
                 continue
             config = str(thing.get("ConfigName") or "").upper()
             thing_type = str(thing.get("Type") or "").upper()
-            is_herb_or_tool = (
+            is_supported_consumable = (
                 "HERB" in config
                 or "TOOL" in config
                 or "DRINK" in config
@@ -393,7 +393,7 @@ def ensure_character_herb_tool_minimum(
                 or "THROW" in config
                 or thing_type in {"HERB", "TOOL"}
             )
-            if not is_herb_or_tool:
+            if not is_supported_consumable:
                 continue
             try:
                 count = int(thing.get("_stackCount") or 0)
