@@ -294,6 +294,8 @@ def replace_character_thing(
         run = json.loads(body_text)
     except json.JSONDecodeError:
         return data, False
+    if not isinstance(run, dict) or not character_guid or not thing_id or not new_config:
+        return data, False
 
     entities = run.get("Entities")
     if not isinstance(entities, list):
@@ -301,11 +303,17 @@ def replace_character_thing(
 
     found = False
     for entity in entities:
+        if not isinstance(entity, dict):
+            continue
         if entity.get("Guid") != character_guid:
             continue
-        comps = entity.setdefault("Components", {})
-        cc = comps.setdefault("CharacterComponent", {})
-        things = cc.setdefault("Things", [])
+        comps = entity.get("Components")
+        if not isinstance(comps, dict):
+            return data, False
+        cc = comps.get("CharacterComponent")
+        if not isinstance(cc, dict):
+            return data, False
+        things = cc.get("Things")
         if not isinstance(things, list):
             return data, False
         for thing in things:
@@ -322,6 +330,57 @@ def replace_character_thing(
     # Keep summary bytes unchanged when possible (avoid reformatting)
     new_plain = f"//**{summary_text}**//{joiner}{new_body}"
     return encrypt_ftk2_text(new_plain), True
+
+
+def add_character_thing(
+    data: bytes,
+    character_guid: str,
+    config: str,
+    thing_type: str,
+) -> tuple[bytes, bool]:
+    """Append an unequipped item to a run character's inventory."""
+    plain = decrypt_ftk2_bytes(data)
+    parts = _split_gamerun_plain(plain)
+    if parts is None:
+        return data, False
+    summary_text, body_text, joiner = parts
+    try:
+        run = json.loads(body_text)
+    except json.JSONDecodeError:
+        return data, False
+    if not isinstance(run, dict) or not character_guid or not config or not thing_type:
+        return data, False
+
+    entities = run.get("Entities")
+    if not isinstance(entities, list):
+        return data, False
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        if entity.get("Guid") != character_guid:
+            continue
+        comps = entity.get("Components")
+        if not isinstance(comps, dict):
+            return data, False
+        cc = comps.get("CharacterComponent")
+        if not isinstance(cc, dict):
+            return data, False
+        things = cc.get("Things")
+        if not isinstance(things, list):
+            return data, False
+        things.append(
+            {
+                "Id": str(uuid.uuid4()),
+                "ConfigName": config,
+                "Type": thing_type,
+                "_stackCount": 1,
+                "Expansion": "BASE",
+            }
+        )
+        new_body = _dump_json_matching_newlines(run, body_text)
+        new_plain = f"//**{summary_text}**//{joiner}{new_body}"
+        return encrypt_ftk2_text(new_plain), True
+    return data, False
 
 
 def set_character_gold(
