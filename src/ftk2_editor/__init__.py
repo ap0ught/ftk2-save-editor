@@ -500,7 +500,7 @@ def carry_over_consumables(target: bytes, source: bytes) -> tuple[bytes, bool, i
         for config, holders in per_config.items()
     }
     if not pool:
-        return target, False, 0
+        return target, True, 0
 
     target_party = _run_party_characters(target_run)
     if not target_party:

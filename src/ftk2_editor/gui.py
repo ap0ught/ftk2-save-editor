@@ -403,6 +403,7 @@ class MainWindow(QMainWindow):
             self._pending_select_guid = None
         if not selected:
             self._populate_inventory(None)
+            self._set_inventory_controls_enabled(False)
         if selected and self._pending_focus_inventory:
             self.tabs.setCurrentWidget(self.inventory_tab)
         self._pending_focus_inventory = False
@@ -583,7 +584,8 @@ class MainWindow(QMainWindow):
 
     def _set_inventory_controls_enabled(self, enabled: bool) -> None:
         self.topup_herb_tool_btn.setEnabled(enabled)
-        self.carry_over_btn.setEnabled(enabled)
+        can_carry_over = self._view is not None and self._view.get("kind") == "run"
+        self.carry_over_btn.setEnabled(can_carry_over)
 
     def _selected_party_row(self) -> dict[str, Any] | None:
         rows = self.party_table.selectionModel().selectedRows()

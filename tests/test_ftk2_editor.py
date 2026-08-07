@@ -286,9 +286,9 @@ def test_carry_over_consumables_roundtrip(source_run_bytes, target_run_bytes):
     # HERB + SCROLL land on the HUNTER (dominant class matches), added to existing/absent.
     assert by_entity["tgt-hunter"]["HERB_HEALING"] == 2 + 5
     assert by_entity["tgt-hunter"]["SCROLL_TELEPORT_01"] == 2
-    # SAFETYSTONE dominant holder is BLACKSMITH in source -> a NEW safetone entry on target BLACKSMITH.
+    # SAFETYSTONE dominant holder is BLACKSMITH in source -> a NEW safetystone entry on target BLACKSMITH.
     assert by_entity["tgt-blacksmith"]["MISC_SAFETYSTONE_01"] == 4
-    # Target HUNTER's own pre-existing safetone is untouched.
+    # Target HUNTER's own pre-existing safetystone is untouched.
     assert by_entity["tgt-hunter"]["MISC_SAFETYSTONE_01"] == 1
     # TOOL_LOCKPICK dominant holder is HUNTER (3 vs 0 elsewhere) -> goes to HUNTER.
     assert by_entity["tgt-hunter"]["TOOL_LOCKPICK"] == 3
@@ -345,7 +345,7 @@ def test_carry_over_empty_source_noop(target_run_bytes):
         {"id": "empty-run", "saveName": "Empty", "difficulty": "normal"},
     )
     modified, ok, updated = carry_over_consumables(target_run_bytes, empty)
-    assert ok is False
+    assert ok is True
     assert updated == 0
     assert modified == target_run_bytes
 
