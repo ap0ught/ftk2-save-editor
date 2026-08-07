@@ -77,7 +77,7 @@ def party_from_entities(
 ) -> list[dict[str, Any]]:
     """Extract unique party-like characters from an Entities list."""
     rows: list[dict[str, Any]] = []
-    seen_names: set[str] = set()
+    seen_guids: set[str] = set()
     for entity in entities:
         if guids is not None and entity.get("Guid") not in guids:
             continue
@@ -93,10 +93,10 @@ def party_from_entities(
             ctype = str(row.get("character_type") or "")
             if not (include_companions and ctype == "COMPANION"):
                 continue
-        key = row["name"]
-        if key in seen_names:
+        key = row["guid"]
+        if key in seen_guids:
             continue
-        seen_names.add(key)
+        seen_guids.add(key)
         rows.append(row)
     return rows
 

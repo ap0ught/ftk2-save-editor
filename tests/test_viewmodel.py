@@ -281,3 +281,43 @@ def test_malformed_player_followers_shape_is_ignored(save):
         row.get("guid") not in {"follower-1", "follower-2"}
         for row in view["party"]
     )
+
+
+def test_party_from_entities_deduplicates_by_guid_not_name():
+    """Two different entities with the same DisplayName must both appear."""
+    entities = [
+        {
+            "Guid": "follower-a",
+            "Components": {
+                "CharacterComponent": {
+                    "DisplayName": "Ally",
+                    "ConfigName": "COMP_01",
+                    "CharacterType": "COMPANION",
+                    "Things": [],
+                },
+                "PlayerComponent": {},
+            },
+        },
+        {
+            "Guid": "follower-b",
+            "Components": {
+                "CharacterComponent": {
+                    "DisplayName": "Ally",
+                    "ConfigName": "COMP_02",
+                    "CharacterType": "COMPANION",
+                    "Things": [],
+                },
+                "PlayerComponent": {},
+            },
+        },
+    ]
+    party = vm.party_from_entities(
+        entities,
+        standard_only=False,
+        player_only=True,
+        include_companions=True,
+    )
+    guids = {row["guid"] for row in party}
+    assert guids == {"follower-a", "follower-b"}
+    # Both have the same name but distinct GUIDs
+    assert len(party) == 2
