@@ -40,6 +40,7 @@ def character_from_entity(entity: dict[str, Any]) -> dict[str, Any] | None:
         {
             "config": t.get("ConfigName"),
             "type": t.get("Type"),
+            "expansion": t.get("Expansion"),
             "count": t.get("_stackCount"),
             "id": t.get("Id"),
         }
@@ -163,8 +164,61 @@ def interesting_stats(stats: dict[str, Any] | None, *, limit: int = 80) -> list[
     return primary + rest[: max(0, limit - len(primary))]
 
 
+def replacement_item_configs(
+    catalog: list[dict[str, str]],
+    selected: dict[str, Any],
+    *,
+    same_type: bool,
+) -> list[str]:
+    """Return replacement configs, optionally matching Type and ConfigName family."""
+    current = str(selected.get("config") or "")
+    wanted_type = selected.get("type")
+    wanted_family = current.partition("_")[0]
+    configs = {
+        str(item["config"])
+        for item in catalog
+        if item.get("config")
+        and item.get("config") != current
+        and (
+            not same_type
+            or (
+                item.get("type") == wanted_type
+                and str(item["config"]).partition("_")[0] == wanted_family
+            )
+        )
+    }
+    return sorted(configs)
+
+
+def unique_saved_items() -> list[dict[str, str]]:
+    """Return unique carried items found across User and each main run save."""
+    paths = ([USER_SAVE] if USER_SAVE.exists() else []) + [
+        item["path"] for item in list_save_candidates()
+    ]
+    catalog: dict[str, tuple[str, str]] = {}
+    for path in paths:
+        try:
+            obj = parse_ftk2(path.read_bytes()).get("json") or {}
+            rows = party_from_run(obj) if "Entities" in obj else party_from_user(obj)
+            for row in rows:
+                for item in row.get("inventory") or []:
+                    config = item.get("config")
+                    item_type = item.get("type")
+                    if config and item_type:
+                        catalog.setdefault(
+                            str(config),
+                            (str(item_type), str(item.get("expansion") or "BASE")),
+                        )
+        except Exception:
+            continue
+    return [
+        {"config": config, "type": metadata[0], "expansion": metadata[1]}
+        for config, metadata in sorted(catalog.items())
+    ]
+
+
 def list_save_candidates() -> list[dict[str, Any]]:
-    """Discover User.ftk2 and GameRuns mains for the sidebar."""
+    """Discover GameRuns mains for the sidebar."""
     items: list[dict[str, Any]] = []
     if GAME_RUNS_DIR.exists():
         mains = [

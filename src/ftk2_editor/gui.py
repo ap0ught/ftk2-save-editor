@@ -12,6 +12,8 @@ from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QFont
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QComboBox,
     QDialog,
     QFileDialog,
     QHBoxLayout,
@@ -38,17 +40,21 @@ from PySide6.QtWidgets import (
 
 from ftk2_editor import (
     FTK2_GAME_DIR,
+    add_character_thing,
     backup,
     carry_over_consumables,
     decrypt_ftk2_bytes,
     ensure_character_herb_tool_minimum,
+    replace_character_thing,
     set_character_gold,
 )
 from ftk2_editor.viewmodel import (
     find_carryover_source,
     list_save_candidates,
     load_save_view,
+    replacement_item_configs,
     run_display_name,
+    unique_saved_items,
 )
 
 APP_TITLE = "FTK2 Save Reader"
@@ -74,6 +80,15 @@ class LoadWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class ItemCatalogWorker(QThread):
+    """Build the cross-save item catalog without blocking the GUI."""
+
+    finished_ok = Signal(object)
+
+    def run(self) -> None:
+        self.finished_ok.emit(unique_saved_items())
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -90,10 +105,14 @@ class MainWindow(QMainWindow):
         self._pending_select_guid: str | None = None
         self._pending_focus_inventory = False
         self._inventory_windows: list[QDialog] = []
+        self._item_catalog: list[dict[str, str]] = []
+        self._catalog_worker = ItemCatalogWorker(self)
+        self._catalog_worker.finished_ok.connect(self._item_catalog.extend)
 
         self._build_actions()
         self._build_ui()
         self.refresh_sidebar()
+        self._catalog_worker.start()
         self.statusBar().showMessage("Open User.ftk2 or a GameRuns save to begin.")
 
     def _build_actions(self) -> None:
@@ -439,7 +458,7 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         dialog.setWindowTitle(f"{title_prefix}: {row.get('name')}")
-        dialog.resize(720, 420)
+        dialog.resize(760, 460)
 
         layout = QVBoxLayout(dialog)
         gold = row.get("gold")
@@ -454,13 +473,201 @@ class MainWindow(QMainWindow):
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.horizontalHeader().setStretchLastSection(True)
         table.setSortingEnabled(False)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setRowCount(len(inventory))
         for i, entry in enumerate(inventory):
-            table.setItem(i, 0, QTableWidgetItem(str(entry.get("type") or "")))
+            item = QTableWidgetItem(str(entry.get("type") or ""))
+            item.setData(Qt.ItemDataRole.UserRole, entry)
+            table.setItem(i, 0, item)
             table.setItem(i, 1, QTableWidgetItem(str(entry.get("config") or "")))
             table.setItem(i, 2, QTableWidgetItem(str(entry.get("count"))))
         table.setSortingEnabled(True)
         layout.addWidget(table)
+
+        # Replace row: pick another item the party carries, optionally the same Type.
+        replace_row = QHBoxLayout()
+        replace_label = QLabel("Replace selected with:")
+        replace_label.setStyleSheet("color: #9aa3ad;")
+        replace_combo = QComboBox()
+        replace_combo.setMinimumWidth(240)
+        same_type_box = QCheckBox("Same type")
+        same_type_box.setChecked(True)
+        same_type_box.setToolTip(
+            "When checked, match the item kind (BOW, BLUNT, HERB, etc.).\n"
+            "Uncheck to list every distinct item found across all save games."
+        )
+        replace_btn = QPushButton("Replace item")
+        replace_btn.setEnabled(False)
+        replace_btn.setToolTip(
+            "Swaps the selected item's ConfigName for the chosen one\n"
+            "on this character only. Equipped-slot wiring and stack stay intact."
+        )
+        add_btn = QPushButton("Add item")
+        add_btn.setEnabled(False)
+        add_btn.setToolTip("Adds the chosen item to this character's inventory.")
+        replace_row.addWidget(replace_label)
+        replace_row.addWidget(replace_combo, 1)
+        replace_row.addWidget(same_type_box)
+        replace_row.addWidget(replace_btn)
+        replace_row.addWidget(add_btn)
+        layout.addLayout(replace_row)
+
+        can_edit = (
+            self._path is not None
+            and self._view is not None
+            and self._view.get("kind") == "run"
+            and bool(row.get("guid"))
+        )
+
+        def _replacement_catalog() -> list[dict[str, Any]]:
+            return self._item_catalog or [
+                item
+                for party_row in self._party_rows
+                for item in (party_row.get("inventory") or [])
+            ]
+
+        def _refresh_replace_options() -> None:
+            replace_combo.clear()
+            replace_btn.setEnabled(False)
+            add_btn.setEnabled(False)
+            if not can_edit:
+                return
+            selected = table.selectionModel().selectedRows()
+            if not selected:
+                options = replacement_item_configs(
+                    _replacement_catalog(), {}, same_type=False
+                )
+                if not options:
+                    replace_label.setText("Add from saved catalog: (no items found in saves)")
+                    return
+                replace_label.setText("Add from saved catalog:")
+                replace_combo.addItems(options)
+                add_btn.setEnabled(True)
+                return
+            cell = table.item(selected[0].row(), 0)
+            if cell is None:
+                return
+            entry = cell.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(entry, dict):
+                return
+            options = replacement_item_configs(
+                _replacement_catalog(), entry, same_type=same_type_box.isChecked()
+            )
+            if not options:
+                replace_label.setText(
+                    "Replace selected with: (no matching items found in saves)"
+                )
+                return
+            replace_label.setText("Replace selected with:")
+            replace_combo.addItems(options)
+            replace_btn.setEnabled(True)
+            add_btn.setEnabled(True)
+
+        table.itemSelectionChanged.connect(_refresh_replace_options)
+        same_type_box.toggled.connect(_refresh_replace_options)
+        _refresh_replace_options()
+
+        def _apply_replace() -> None:
+            if not self._path or self._view is None or self._view.get("kind") != "run":
+                QMessageBox.warning(
+                    self, APP_TITLE, "Open a GameRuns/*.ftk2 expedition save to replace items."
+                )
+                return
+            selected = table.selectionModel().selectedRows()
+            if not selected:
+                QMessageBox.information(self, APP_TITLE, "Select an item row first.")
+                return
+            cell = table.item(selected[0].row(), 0)
+            if cell is None:
+                return
+            entry = cell.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(entry, dict):
+                return
+            thing_id = entry.get("id")
+            new_config = replace_combo.currentText()
+            guid = row.get("guid")
+            if not guid:
+                QMessageBox.warning(self, APP_TITLE, "That inventory row has no character ID.")
+                return
+            if not thing_id or not new_config:
+                return
+            old_config = entry.get("config")
+            reply = QMessageBox.question(
+                self,
+                APP_TITLE,
+                f"Replace {old_config} with {new_config} on {row.get('name')}?\n\n"
+                f"File: {self._path}\n"
+                "A .bak backup will be created. Quit the game first if it is running.",
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                bak = backup(self._path)
+                data = self._path.read_bytes()
+                modified, ok = replace_character_thing(
+                    data, str(guid), thing_id, new_config
+                )
+                if not ok:
+                    QMessageBox.critical(self, APP_TITLE, "Could not find that item in the run.")
+                    return
+                self._path.write_bytes(modified)
+                self.statusBar().showMessage(
+                    f"Replaced {old_config} → {new_config} on {row.get('name')} (backup {bak.name})"
+                )
+                dialog.close()
+                self.load_path(self._path)
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.critical(self, APP_TITLE, f"Save failed:\n{exc}")
+
+        replace_btn.clicked.connect(_apply_replace)
+
+        def _apply_add() -> None:
+            if not self._path or self._view is None or self._view.get("kind") != "run":
+                QMessageBox.warning(
+                    self, APP_TITLE, "Open a GameRuns/*.ftk2 expedition save to add items."
+                )
+                return
+            config = replace_combo.currentText()
+            guid = row.get("guid")
+            if not guid:
+                QMessageBox.warning(self, APP_TITLE, "That inventory row has no character ID.")
+                return
+            catalog_item = next(
+                (item for item in _replacement_catalog() if item.get("config") == config), None
+            )
+            if not config or catalog_item is None:
+                return
+            reply = QMessageBox.question(
+                self,
+                APP_TITLE,
+                f"Add {config} to {row.get('name')}'s inventory?\n\n"
+                f"File: {self._path}\n"
+                "A .bak backup will be created. Quit the game first if it is running.",
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                bak = backup(self._path)
+                modified, ok = add_character_thing(
+                    self._path.read_bytes(),
+                    str(guid),
+                    config,
+                    str(catalog_item.get("type") or "ITEM"),
+                    str(catalog_item.get("expansion") or "BASE"),
+                )
+                if not ok:
+                    QMessageBox.critical(self, APP_TITLE, "Could not find that character in the run.")
+                    return
+                self._path.write_bytes(modified)
+                self.statusBar().showMessage(
+                    f"Added {config} to {row.get('name')} (backup {bak.name})"
+                )
+                dialog.close()
+                self.load_path(self._path)
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.critical(self, APP_TITLE, f"Save failed:\n{exc}")
+
+        add_btn.clicked.connect(_apply_add)
 
         self._inventory_windows.append(dialog)
         dialog.finished.connect(lambda _code: self._inventory_windows.remove(dialog) if dialog in self._inventory_windows else None)
@@ -469,6 +676,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         self._load_generation += 1  # ignore late UI updates
         self._stop_loader()
+        self._catalog_worker.wait()
         super().closeEvent(event)
 
     def _populate_overview(self) -> None:
