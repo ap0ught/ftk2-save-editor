@@ -67,13 +67,36 @@ def _enemy_entity(guid: str, name: str) -> dict:
     }
 
 
+def _follower_entity(guid: str, name: str, config: str, ctype: str) -> dict:
+    """A COMPANION/MERCENARY entity referenced by PlayerFollowers."""
+    return {
+        "Guid": guid,
+        "Components": {
+            "CharacterComponent": {
+                "DisplayName": name,
+                "ConfigName": config,
+                "CharacterType": ctype,
+                "CurrentHealth": 60,
+                "CurrentFocus": 10,
+                "Things": [_wallet_thing("HERB_HEALING", 3)],
+            }
+        },
+    }
+
+
 def _make_run() -> dict:
     return {
         "Entities": [
             _party_entity("hero-1", "Alaric", "HUNTER", gold=250, xp=120),
             _party_entity("hero-2", "Liora", "BLACKSMITH", gold=75, xp=90),
             _enemy_entity("enemy-1", "Goblin"),
+            _follower_entity("follower-1", "Sparky", "COMPANION_BAT_BASIC_06", "COMPANION"),
+            _follower_entity("follower-2", "Bolt", "MERC_ARCHER_BASIC_03", "MERCENARY"),
         ],
+        "PlayerFollowers": {
+            "hero-1": {"FollowerID": "follower-1", "RoundsToExpire": 1},
+            "hero-2": {"FollowerID": "follower-2", "RoundsToExpire": 0},
+        },
         "Stats": {"GOLD_COLLECTED": 1000, "GOLD_SPENT": 400},
         "HouseRules": {"RULES_HERB_SALVAGE": True},
         "GameDifficulty": "Apprentice",
@@ -153,11 +176,12 @@ def test_load_active_run_party_gold(save):
     assert isinstance(view.get("non_party"), list)
     assert all(
         row.get("has_player_component") is True
-        or row.get("character_type") == "COMPANION"
+        or row.get("character_type") in ("COMPANION", "MERCENARY")
         for row in view.get("party", [])
     )
     assert all(
         (row.get("character_type") in (None, "STANDARD"))
+        or row.get("character_type") in ("COMPANION", "MERCENARY")
         for row in view.get("party", [])
     )
     assert view["overview"]["party_gold_total"] is not None
@@ -178,3 +202,30 @@ def test_run_display_name_falls_back_to_filename(tmp_path):
     missing = tmp_path / "not-a-parseable.ftk2"
     missing.write_text("garbage")
     assert vm.run_display_name(missing) == "not-a-parseable.ftk2"
+
+
+def test_followers_surface_in_party(save):
+    view = vm.load_save_view(save["run"])
+    guids = {row.get("guid") for row in view["party"]}
+    # Both COMPANION and MERCENARY followers referenced by PlayerFollowers
+    # must appear alongside the main heroes, not in non_party.
+    assert "follower-1" in guids
+    assert "follower-2" in guids
+    assert any(row.get("character_type") == "COMPANION" for row in view["party"])
+    assert any(row.get("character_type") == "MERCENARY" for row in view["party"])
+    np_guids = {row.get("guid") for row in view["non_party"]}
+    assert "follower-1" not in np_guids
+    assert "follower-2" not in np_guids
+
+
+def test_malformed_player_followers_shape_is_ignored(save):
+    run = _make_run()
+    run["PlayerFollowers"] = ["not", "a", "mapping"]
+    _write_ftk2(save["run"], run, run=True)
+
+    view = vm.load_save_view(save["run"])
+
+    assert all(
+        row.get("guid") not in {"follower-1", "follower-2"}
+        for row in view["party"]
+    )

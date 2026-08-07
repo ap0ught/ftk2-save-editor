@@ -350,6 +350,30 @@ def test_carry_over_empty_source_noop(target_run_bytes):
     assert modified == target_run_bytes
 
 
+def test_ensure_character_herb_tool_minimum_tops_up_thrown(sample_run_bytes):
+    # THROW_ configs (Type=EQUIPMENT) must now be topped up to the minimum too.
+    run = parse_ftk2(sample_run_bytes)["json"]
+    things = run["Entities"][0]["Components"]["CharacterComponent"]["Things"]
+    things.append({"ConfigName": "THROW_MILITIA_BOMB_00", "Type": "EQUIPMENT", "_stackCount": 1})
+    things.append({"ConfigName": "THROW_MILITIA_FIRE_00", "Type": "EQUIPMENT", "_stackCount": 1})
+    summary = {"runID": "run-123", "saveName": "Test Expedition", "difficulty": "normal"}
+    text = f"//**{json.dumps(summary)}**//\n{json.dumps(run, indent=2)}\n"
+    with_thrown = encrypt_ftk2_text(text)
+
+    modified, ok, updated = ensure_character_herb_tool_minimum(
+        with_thrown,
+        "hero-1",
+        minimum=10,
+    )
+    assert ok is True
+    assert updated == 5  # herb + tool + drink + 2 thrown stacks
+
+    things = parse_ftk2(modified)["json"]["Entities"][0]["Components"]["CharacterComponent"]["Things"]
+    by_name = {entry["ConfigName"]: entry["_stackCount"] for entry in things}
+    assert by_name["THROW_MILITIA_BOMB_00"] == 10
+    assert by_name["THROW_MILITIA_FIRE_00"] == 10
+
+
 def test_verify_save_roundtrip(sample_user_obj, tmp_path):
     # Hermetic: verify a save written to disk by our own tooling parses back
     # cleanly, without depending on a local game install.
