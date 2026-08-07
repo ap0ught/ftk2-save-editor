@@ -173,6 +173,27 @@ def test_ensure_character_herb_tool_minimum_not_gamerun(sample_save_bytes):
     assert updated == 0
 
 
+def test_ensure_character_herb_tool_minimum_tops_up_scrolls(sample_run_bytes):
+    # Extend the shared run fixture with scroll + safetystone stacks below the minimum.
+    run = parse_ftk2(sample_run_bytes)["json"]
+    things = run["Entities"][0]["Components"]["CharacterComponent"]["Things"]
+    things.append({"ConfigName": "SCROLL_TELEPORT_01", "Type": "ITEM", "_stackCount": 1})
+    things.append({"ConfigName": "SCROLL_VISION_01", "Type": "ITEM", "_stackCount": 1})
+    things.append({"ConfigName": "MISC_SAFETYSTONE_01", "Type": "ITEM", "_stackCount": 1})
+    summary = {"runID": "run-123", "saveName": "Test Expedition", "difficulty": "normal"}
+    text = f"//**{json.dumps(summary)}**//\n{json.dumps(run, indent=2)}\n"
+    with_scrolls = encrypt_ftk2_text(text)
+
+    modified, ok, updated = ensure_character_herb_tool_minimum(
+        with_scrolls,
+        "hero-1",
+        minimum=10,
+    )
+    assert ok is True
+    assert updated == 6  # herb + tool + drink + 2 scrolls + safetystone
+
+
+
 def test_verify_save_real_file():
     save_path = find_save_file()
     data = save_path.read_bytes()
