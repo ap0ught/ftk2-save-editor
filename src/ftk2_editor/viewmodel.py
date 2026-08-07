@@ -186,6 +186,52 @@ def list_save_candidates() -> list[dict[str, Any]]:
     return items
 
 
+def find_carryover_source(current: Path) -> Path | None:
+    """Locate the most recent save slot of a *different* run (the previous act).
+
+    Given the currently-open save, scan all ``GameRuns`` *.ftk2 files, group them
+    by run id (filename stem before any trailing ``-N``), pick the most-recently
+    modified run other than ``current``'s own run, and return its newest slot (or
+    the bare file if no numbered slots exist).  Returns ``None`` when there is no
+    other run on disk.
+    """
+    current = Path(current)
+    files = list(GAME_RUNS_DIR.glob("*.ftk2")) if GAME_RUNS_DIR.exists() else []
+    if not files:
+        return None
+
+    current_run = _run_key(current)
+    by_run: dict[str, list[Path]] = {}
+    for p in files:
+        key = _run_key(p)
+        if key == current_run:
+            continue
+        by_run.setdefault(key, []).append(p)
+
+    if not by_run:
+        return None
+
+    # Newest run = the one with the latest mtime among its newest slot.
+    def newest_of(paths: list[Path]) -> tuple[float, Path]:
+        best = max(paths, key=lambda p: p.stat().st_mtime)
+        return best.stat().st_mtime, best
+
+    candidate_runs = sorted(
+        (newest_of(paths) for paths in by_run.values()),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    return candidate_runs[0][1]
+
+
+def _run_key(path: Path) -> str:
+    """Stable run id: strip a trailing ``-N`` slot suffix (all-digit segment)."""
+    stem = path.stem
+    if stem.rsplit("-", 1)[-1].isdigit():
+        stem = stem.rsplit("-", 1)[0]
+    return stem
+
+
 def load_save_view(path: Path) -> dict[str, Any]:
     """Parse a save into a GUI-friendly view model."""
     path = Path(path)

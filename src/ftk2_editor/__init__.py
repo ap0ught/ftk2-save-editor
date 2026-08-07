@@ -413,6 +413,153 @@ def ensure_character_herb_tool_minimum(
     return encrypt_ftk2_text(new_plain), True, updated_entries
 
 
+CONSUMABLE_TOKENS = ("HERB", "DRINK", "TOOL", "SCROLL", "SAFETYSTONE")
+
+
+def _is_consumable(thing: dict[str, Any]) -> bool:
+    """True for non-equipment, non-currency, non-XP consumables (herbs, drinks, tools, scrolls, safetystones)."""
+    config = str(thing.get("ConfigName") or "").upper()
+    thing_type = str(thing.get("Type") or "").upper()
+    if thing_type in {"EQUIPMENT", "PASSIVE"} or config == "CURRENCY_ADVENTURE":
+        return False
+    return any(token in config for token in CONSUMABLE_TOKENS) or thing_type in {"HERB", "TOOL"}
+
+
+def _run_party_characters(run: dict[str, Any]) -> list[dict[str, Any]]:
+    """Party characters of a GameRun (player entities or companions)."""
+    entities = run.get("Entities")
+    if not isinstance(entities, list):
+        return []
+    party: list[dict[str, Any]] = []
+    for entity in entities:
+        comps = entity.get("Components") or {}
+        cc = comps.get("CharacterComponent") or {}
+        if not isinstance(cc, dict) or not isinstance(cc.get("Things"), list):
+            continue
+        has_player = isinstance(comps.get("PlayerComponent"), dict)
+        ctype = str(cc.get("CharacterType") or "")
+        if has_player or ctype == "COMPANION":
+            party.append(entity)
+    return party
+
+
+def carry_over_consumables(target: bytes, source: bytes) -> tuple[bytes, bool, int]:
+    """Carry consumables from *source* (a previous act's GameRun) onto *target*'s party.
+
+    Sums each consumable (herb/drink/tool/scroll/safetystone) party-wide in the
+    source save, then adds the total onto the target party's matching stack —
+    preferring the same character class as the dominant holder, then any member
+    that already holds the item, then the first party member.  Equipment, gold
+    (``CURRENCY_ADVENTURE``) and XP (``PASSIVE``) are never copied.
+
+    Returns ``(new_target_bytes, ok, updated_entries)`` where ``ok`` means both
+    inputs were GameRun saves with a non-empty party.
+    """
+    plain = decrypt_ftk2_bytes(target)
+    parts = _split_gamerun_plain(plain)
+    if parts is None:
+        return target, False, 0
+    target_summary, target_body, joiner = parts
+    try:
+        target_run = json.loads(target_body)
+    except json.JSONDecodeError:
+        return target, False, 0
+
+    source_plain = decrypt_ftk2_bytes(source)
+    source_parts = _split_gamerun_plain(source_plain)
+    if source_parts is None:
+        return target, False, 0
+    try:
+        source_run = json.loads(source_parts[1])
+    except json.JSONDecodeError:
+        return target, False, 0
+
+    source_party = _run_party_characters(source_run)
+    if not source_party:
+        return target, False, 0
+
+    # Party-wide pool: ConfigName -> (total count, dominant holder class).
+    per_config: dict[str, list[tuple[str, int]]] = {}
+    for entity in source_party:
+        cc = (entity.get("Components") or {}).get("CharacterComponent") or {}
+        char_class = str(cc.get("ConfigName") or "")
+        for thing in cc.get("Things") or []:
+            if not isinstance(thing, dict) or not _is_consumable(thing):
+                continue
+            config = str(thing.get("ConfigName") or "")
+            if not config:
+                continue
+            try:
+                count = int(thing.get("_stackCount") or 0)
+            except (TypeError, ValueError):
+                count = 0
+            per_config.setdefault(config, []).append((char_class, count))
+
+    pool = {
+        config: (sum(n for _, n in holders), max(holders, key=lambda h: h[1])[0])
+        for config, holders in per_config.items()
+    }
+    if not pool:
+        return target, False, 0
+
+    target_party = _run_party_characters(target_run)
+    if not target_party:
+        return target, False, 0
+
+    updated_entries = 0
+    for config, (amount, dominant_class) in sorted(pool.items()):
+        if amount <= 0:
+            continue
+        # Recipient: same class as dominant holder, else anyone holding it, else first member.
+        recipient: dict[str, Any] | None = None
+        for entity in target_party:
+            cc = (entity.get("Components") or {}).get("CharacterComponent") or {}
+            if str(cc.get("ConfigName") or "") == dominant_class:
+                recipient = entity
+                break
+        if recipient is None:
+            for entity in target_party:
+                cc = (entity.get("Components") or {}).get("CharacterComponent") or {}
+                if any(
+                    isinstance(t, dict) and t.get("ConfigName") == config
+                    for t in cc.get("Things") or []
+                ):
+                    recipient = entity
+                    break
+        if recipient is None:
+            recipient = target_party[0]
+
+        cc = (recipient.get("Components") or {}).setdefault("CharacterComponent", {})
+        things = cc.setdefault("Things", [])
+        if not isinstance(things, list):
+            return target, False, 0
+        existing = None
+        for thing in things:
+            if isinstance(thing, dict) and thing.get("ConfigName") == config:
+                existing = thing
+                break
+        if existing is not None:
+            try:
+                existing["_stackCount"] = int(existing.get("_stackCount") or 0) + amount
+            except (TypeError, ValueError):
+                existing["_stackCount"] = amount
+        else:
+            things.append(
+                {
+                    "Id": str(uuid.uuid4()),
+                    "ConfigName": config,
+                    "Type": "ITEM",
+                    "_stackCount": amount,
+                    "Expansion": "BASE",
+                }
+            )
+        updated_entries += 1
+
+    new_body = _dump_json_matching_newlines(target_run, target_body)
+    new_plain = f"//**{target_summary}**//{joiner}{new_body}"
+    return encrypt_ftk2_text(new_plain), True, updated_entries
+
+
 def set_local_stat(data: bytes, stat_name: str, value: int) -> tuple[bytes, bool]:
     """Convenience wrapper for ``LocalStats`` integer edits."""
     return edit_field(data, f"LocalStats.{stat_name}", str(int(value)))
