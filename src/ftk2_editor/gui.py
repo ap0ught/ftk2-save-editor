@@ -12,6 +12,8 @@ from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QFont
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QComboBox,
     QDialog,
     QFileDialog,
     QHBoxLayout,
@@ -41,6 +43,7 @@ from ftk2_editor import (
     backup,
     decrypt_ftk2_bytes,
     ensure_character_herb_tool_minimum,
+    replace_character_thing,
     set_character_gold,
 )
 from ftk2_editor.viewmodel import list_save_candidates, load_save_view
@@ -425,7 +428,7 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         dialog.setWindowTitle(f"{title_prefix}: {row.get('name')}")
-        dialog.resize(720, 420)
+        dialog.resize(760, 460)
 
         layout = QVBoxLayout(dialog)
         gold = row.get("gold")
@@ -440,13 +443,130 @@ class MainWindow(QMainWindow):
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.horizontalHeader().setStretchLastSection(True)
         table.setSortingEnabled(False)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setRowCount(len(inventory))
         for i, entry in enumerate(inventory):
-            table.setItem(i, 0, QTableWidgetItem(str(entry.get("type") or "")))
+            item = QTableWidgetItem(str(entry.get("type") or ""))
+            item.setData(Qt.ItemDataRole.UserRole, entry)
+            table.setItem(i, 0, item)
             table.setItem(i, 1, QTableWidgetItem(str(entry.get("config") or "")))
             table.setItem(i, 2, QTableWidgetItem(str(entry.get("count"))))
         table.setSortingEnabled(True)
         layout.addWidget(table)
+
+        # Replace row: pick another item the party carries, optionally the same Type.
+        replace_row = QHBoxLayout()
+        replace_label = QLabel("Replace selected with:")
+        replace_label.setStyleSheet("color: #9aa3ad;")
+        replace_combo = QComboBox()
+        replace_combo.setMinimumWidth(240)
+        same_type_box = QCheckBox("Same type")
+        same_type_box.setChecked(True)
+        same_type_box.setToolTip(
+            "When checked, only list items whose Type matches the selected row.\n"
+            "Uncheck to list every distinct item your party carries."
+        )
+        replace_btn = QPushButton("Replace item")
+        replace_btn.setEnabled(False)
+        replace_btn.setToolTip(
+            "Swaps the selected item's ConfigName for the chosen one\n"
+            "on this character only. Equipped-slot wiring and stack stay intact."
+        )
+        replace_row.addWidget(replace_label)
+        replace_row.addWidget(replace_combo, 1)
+        replace_row.addWidget(same_type_box)
+        replace_row.addWidget(replace_btn)
+        layout.addLayout(replace_row)
+
+        can_edit = bool(row.get("guid"))
+
+        def _refresh_replace_options() -> None:
+            replace_combo.clear()
+            replace_btn.setEnabled(False)
+            if not can_edit:
+                return
+            selected = table.selectionModel().selectedRows()
+            if not selected:
+                return
+            cell = table.item(selected[0].row(), 0)
+            if cell is None:
+                return
+            entry = cell.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(entry, dict):
+                return
+            wanted_type = entry.get("type") if same_type_box.isChecked() else None
+            current = entry.get("config")
+            options: list[str] = []
+            seen: set[str] = set()
+            for prow in self._party_rows:
+                for pent in prow.get("inventory") or []:
+                    if wanted_type is not None and pent.get("type") != wanted_type:
+                        continue
+                    config = pent.get("config")
+                    if config and config != current and config not in seen:
+                        seen.add(config)
+                        options.append(config)
+            if not options:
+                replace_label.setText(
+                    "Replace selected with: (no matching items carried by party)"
+                )
+                return
+            replace_label.setText("Replace selected with:")
+            replace_combo.addItems(sorted(options))
+            replace_btn.setEnabled(True)
+
+        table.itemSelectionChanged.connect(_refresh_replace_options)
+        same_type_box.toggled.connect(_refresh_replace_options)
+
+        def _apply_replace() -> None:
+            if not self._path or self._view is None or self._view.get("kind") != "run":
+                QMessageBox.warning(
+                    self, APP_TITLE, "Open a GameRuns/*.ftk2 expedition save to replace items."
+                )
+                return
+            selected = table.selectionModel().selectedRows()
+            if not selected:
+                QMessageBox.information(self, APP_TITLE, "Select an item row first.")
+                return
+            cell = table.item(selected[0].row(), 0)
+            if cell is None:
+                return
+            entry = cell.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(entry, dict):
+                return
+            thing_id = entry.get("id")
+            new_config = replace_combo.currentText()
+            if not thing_id or not new_config:
+                return
+            old_config = entry.get("config")
+            reply = QMessageBox.question(
+                self,
+                APP_TITLE,
+                f"Replace {old_config} with {new_config} on {row.get('name')}?\n\n"
+                f"File: {self._path}\n"
+                "A .bak backup will be created. Quit the game first if it is running.",
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                bak = backup(self._path)
+                data = self._path.read_bytes()
+                modified, ok = replace_character_thing(
+                    data, str(row["guid"]), thing_id, new_config
+                )
+                if not ok:
+                    QMessageBox.critical(self, APP_TITLE, "Could not find that item in the run.")
+                    return
+                self._path.write_bytes(modified)
+                self.statusBar().showMessage(
+                    f"Replaced {old_config} → {new_config} on {row.get('name')} (backup {bak.name})"
+                )
+                dialog.close()
+                self.load_path(self._path)
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.critical(self, APP_TITLE, f"Save failed:\n{exc}")
+
+        replace_btn.clicked.connect(_apply_replace)
 
         self._inventory_windows.append(dialog)
         dialog.finished.connect(lambda _code: self._inventory_windows.remove(dialog) if dialog in self._inventory_windows else None)

@@ -15,6 +15,7 @@ from ftk2_editor import (
     ensure_character_herb_tool_minimum,
     encrypt_ftk2_text,
     parse_ftk2,
+    replace_character_thing,
     verify_save,
     xor_crypt,
 )
@@ -196,6 +197,54 @@ def test_ensure_character_herb_tool_minimum_tops_up_scrolls(sample_run_bytes):
     assert by_name["SCROLL_TELEPORT_01"] == 10
     assert by_name["SCROLL_VISION_01"] == 10
     assert by_name["MISC_SAFETYSTONE_01"] == 10
+
+
+def test_replace_character_thing_swaps_config_name():
+    run = {
+        "Entities": [
+            {
+                "Guid": "hero-1",
+                "Components": {
+                    "CharacterComponent": {
+                        "DisplayName": "Hero",
+                        "ConfigName": "HUNTER",
+                        "Things": [
+                            {
+                                "Id": "bow-1",
+                                "ConfigName": "BOW_MILITIA_MEDIUM_00",
+                                "Type": "EQUIPMENT",
+                                "_stackCount": 1,
+                                "Expansion": "BASE",
+                            },
+                        ],
+                    }
+                },
+            }
+        ]
+    }
+    summary = {"runID": "run-123", "saveName": "Test Expedition", "difficulty": "normal"}
+    text = f"//**{json.dumps(summary)}**//\n{json.dumps(run, indent=2)}\n"
+    blob = encrypt_ftk2_text(text)
+
+    modified, ok = replace_character_thing(blob, "hero-1", "bow-1", "BOW_LONGBOW_02")
+    assert ok is True
+    things = parse_ftk2(modified)["json"]["Entities"][0]["Components"]["CharacterComponent"]["Things"]
+    assert things[0]["ConfigName"] == "BOW_LONGBOW_02"
+    assert things[0]["Id"] == "bow-1"  # equipped-slot wiring stays intact
+    assert things[0]["Type"] == "EQUIPMENT"
+    assert things[0]["_stackCount"] == 1
+
+
+def test_replace_character_thing_missing_thing(sample_run_bytes):
+    modified, ok = replace_character_thing(sample_run_bytes, "hero-1", "nope", "BOW_X")
+    assert ok is False
+    assert modified == sample_run_bytes
+
+
+def test_replace_character_thing_not_gamerun(sample_save_bytes):
+    modified, ok = replace_character_thing(sample_save_bytes, "hero-1", "bow-1", "BOW_X")
+    assert ok is False
+    assert modified == sample_save_bytes
 
 
 def test_verify_save_roundtrip(sample_user_obj, tmp_path):
