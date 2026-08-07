@@ -194,6 +194,16 @@ def test_party_from_run_helper(save):
     assert len(party) >= 1
 
 
+def test_run_display_name_uses_save_name(save):
+    assert vm.run_display_name(save["run"]) == "Test run"
+
+
+def test_run_display_name_falls_back_to_filename(tmp_path):
+    missing = tmp_path / "not-a-parseable.ftk2"
+    missing.write_text("garbage")
+    assert vm.run_display_name(missing) == "not-a-parseable.ftk2"
+
+
 def test_followers_surface_in_party(save):
     view = vm.load_save_view(save["run"])
     guids = {row.get("guid") for row in view["party"]}

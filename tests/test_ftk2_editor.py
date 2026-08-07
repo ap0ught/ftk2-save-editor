@@ -9,6 +9,7 @@ import pytest
 from ftk2_editor import (
     ENCRYPT_KEY,
     backup,
+    carry_over_consumables,
     decrypt_ftk2_bytes,
     dump_summary,
     edit_field,
@@ -196,6 +197,184 @@ def test_ensure_character_herb_tool_minimum_tops_up_scrolls(sample_run_bytes):
     assert by_name["SCROLL_TELEPORT_01"] == 10
     assert by_name["SCROLL_VISION_01"] == 10
     assert by_name["MISC_SAFETYSTONE_01"] == 10
+
+
+def _run_blob(run: dict, summary: dict) -> bytes:
+    text = f"//**{json.dumps(summary)}**//\n{json.dumps(run, indent=2)}\n"
+    return encrypt_ftk2_text(text)
+
+
+def _char_entity(guid: str, config: str, things: list, *, companion: bool = False) -> dict:
+    comps = {"CharacterComponent": {"DisplayName": config, "ConfigName": config, "Things": things}}
+    if companion:
+        comps["CharacterComponent"]["CharacterType"] = "COMPANION"
+        comps["CharacterComponent"]["ExtraLives"] = 0
+    else:
+        comps["PlayerComponent"] = {"IsPlayer": True}
+    return {"Guid": guid, "Components": comps}
+
+
+@pytest.fixture
+def source_run_bytes():
+    return _run_blob(
+        {
+            "Entities": [
+                _char_entity(
+                    "src-hunter",
+                    "HUNTER",
+                    [
+                        {"ConfigName": "HERB_HEALING", "Type": "ITEM", "_stackCount": 5},
+                        {"ConfigName": "TOOL_LOCKPICK", "Type": "ITEM", "_stackCount": 3},
+                        {
+                            "ConfigName": "SCROLL_TELEPORT_01",
+                            "Type": "SPECIAL",
+                            "_stackCount": 2,
+                            "Expansion": "LORE_STORE",
+                        },
+                    ],
+                ),
+                _char_entity(
+                    "src-blacksmith",
+                    "BLACKSMITH",
+                    [
+                        {"ConfigName": "MISC_SAFETYSTONE_01", "Type": "ITEM", "_stackCount": 4},
+                        {"ConfigName": "WEAPON_SWORD", "Type": "EQUIPMENT", "_stackCount": 1},
+                        {"ConfigName": "CURRENCY_ADVENTURE", "_stackCount": 999},
+                        {"ConfigName": "XP", "Type": "PASSIVE", "_stackCount": 12345},
+                    ],
+                ),
+                _char_entity("src-pet", "SPIDER", [], companion=True),
+            ],
+        },
+        {"runID": "source-run", "saveName": "Previous Act", "difficulty": "normal"},
+    )
+
+
+@pytest.fixture
+def target_run_bytes():
+    return _run_blob(
+        {
+            "Entities": [
+                _char_entity(
+                    "tgt-hunter",
+                    "HUNTER",
+                    [
+                        {"ConfigName": "HERB_HEALING", "Type": "ITEM", "_stackCount": 2},
+                        {"ConfigName": "MISC_SAFETYSTONE_01", "Type": "ITEM", "_stackCount": 1},
+                    ],
+                ),
+                _char_entity(
+                    "tgt-blacksmith",
+                    "BLACKSMITH",
+                    [
+                        {"ConfigName": "TOOL_LOCKPICK", "Type": "ITEM", "_stackCount": 1},
+                        {"ConfigName": "CURRENCY_ADVENTURE", "_stackCount": 50},
+                        {"ConfigName": "XP", "Type": "PASSIVE", "_stackCount": 100},
+                    ],
+                ),
+            ]
+        },
+        {"id": "current-run", "saveName": "Current Act", "difficulty": "normal"},
+    )
+
+
+def test_carry_over_consumables_roundtrip(source_run_bytes, target_run_bytes):
+    modified, ok, updated = carry_over_consumables(target_run_bytes, source_run_bytes)
+    assert ok is True
+    assert updated == 4  # herb, tool, scroll, safetystone
+
+    obj = parse_ftk2(modified)["json"]
+    by_entity = {
+        e["Guid"]: {t["ConfigName"]: t["_stackCount"] for t in e["Components"]["CharacterComponent"]["Things"]}
+        for e in obj["Entities"]
+    }
+    # HERB + SCROLL land on the HUNTER (dominant class matches), added to existing/absent.
+    assert by_entity["tgt-hunter"]["HERB_HEALING"] == 2 + 5
+    assert by_entity["tgt-hunter"]["SCROLL_TELEPORT_01"] == 2
+    target_hunter = next(e for e in obj["Entities"] if e["Guid"] == "tgt-hunter")
+    scroll = next(
+        t
+        for t in target_hunter["Components"]["CharacterComponent"]["Things"]
+        if t["ConfigName"] == "SCROLL_TELEPORT_01"
+    )
+    assert scroll["Type"] == "SPECIAL"
+    assert scroll["Expansion"] == "LORE_STORE"
+    # SAFETYSTONE dominant holder is BLACKSMITH in source -> a NEW safetystone entry on target BLACKSMITH.
+    assert by_entity["tgt-blacksmith"]["MISC_SAFETYSTONE_01"] == 4
+    # Target HUNTER's own pre-existing safetystone is untouched.
+    assert by_entity["tgt-hunter"]["MISC_SAFETYSTONE_01"] == 1
+    # TOOL_LOCKPICK dominant holder is HUNTER (3 vs 0 elsewhere) -> goes to HUNTER.
+    assert by_entity["tgt-hunter"]["TOOL_LOCKPICK"] == 3
+    # Equipment, gold, XP never copied (target keeps its own gold/XP as-is).
+    all_configs = {
+        t["ConfigName"]
+        for e in obj["Entities"]
+        for t in e["Components"]["CharacterComponent"]["Things"]
+    }
+    assert "WEAPON_SWORD" not in all_configs
+    assert by_entity["tgt-blacksmith"]["CURRENCY_ADVENTURE"] == 50
+    assert by_entity["tgt-blacksmith"]["XP"] == 100
+
+
+def test_carry_over_consumables_excludes_eq_gold_xp(source_run_bytes, target_run_bytes):
+    # Source's BLACKSMITH holds equipment, gold, and XP that must not be copied.
+    modified, ok, updated = carry_over_consumables(target_run_bytes, source_run_bytes)
+    assert ok is True
+    obj = parse_ftk2(modified)["json"]
+    target_hunter = next(e for e in obj["Entities"] if e["Guid"] == "tgt-hunter")
+    target_smith = next(e for e in obj["Entities"] if e["Guid"] == "tgt-blacksmith")
+    extra_smith = target_smith["Components"]["CharacterComponent"]["Things"]
+    configs_smith = {t["ConfigName"] for t in extra_smith}
+    assert "WEAPON_SWORD" not in configs_smith
+    hunter_configs = {t["ConfigName"] for t in target_hunter["Components"]["CharacterComponent"]["Things"]}
+    assert "XP" not in hunter_configs
+    # gold stack untouched (still at its current 50)
+    gold = next(t for t in extra_smith if t["ConfigName"] == "CURRENCY_ADVENTURE")
+    assert gold["_stackCount"] == 50
+
+
+def test_carry_over_non_gamerun_returns_unchanged(sample_save_bytes, source_run_bytes):
+    modified, ok, updated = carry_over_consumables(sample_save_bytes, source_run_bytes)
+    assert ok is False
+    assert updated == 0
+    assert modified == sample_save_bytes
+
+
+def test_carry_over_empty_source_noop(target_run_bytes):
+    # Source has no consumables to carry (only equipment/gold/XP) -> no-op.
+    empty = _run_blob(
+        {
+            "Entities": [
+                _char_entity(
+                    "a",
+                    "HUNTER",
+                    [
+                        {"ConfigName": "WEAPON_SWORD", "Type": "EQUIPMENT", "_stackCount": 1},
+                        {"ConfigName": "CURRENCY_ADVENTURE", "_stackCount": 999},
+                    ],
+                )
+            ]
+        },
+        {"id": "empty-run", "saveName": "Empty", "difficulty": "normal"},
+    )
+    modified, ok, updated = carry_over_consumables(target_run_bytes, empty)
+    assert ok is True
+    assert updated == 0
+    assert modified == target_run_bytes
+
+
+@pytest.mark.parametrize("invalid_body", [[], None, "not-an-object"])
+def test_carry_over_rejects_non_object_run_json(target_run_bytes, source_run_bytes, invalid_body):
+    malformed = _run_blob(
+        invalid_body,
+        {"id": "malformed-run", "saveName": "Malformed", "difficulty": "normal"},
+    )
+
+    modified, ok, updated = carry_over_consumables(malformed, source_run_bytes)
+    assert (modified, ok, updated) == (malformed, False, 0)
+
+    modified, ok, updated = carry_over_consumables(target_run_bytes, malformed)
+    assert (modified, ok, updated) == (target_run_bytes, False, 0)
 
 
 def test_ensure_character_herb_tool_minimum_tops_up_thrown(sample_run_bytes):
