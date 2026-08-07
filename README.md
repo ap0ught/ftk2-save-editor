@@ -27,7 +27,7 @@ Wallet gold is the inventory item **`CURRENCY_ADVENTURE`** on each party member:
 ## Install
 
 ```bash
-cd /home/cmayfield/code/games/ftk2/ftk2-save-editor
+cd /home/cmayfield/code/games/SE/ftk2-save-editor
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .

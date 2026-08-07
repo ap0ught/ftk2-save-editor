@@ -53,7 +53,7 @@ Game runs: same folder under `GameRuns/`.
 ## Usage
 
 ```bash
-cd /home/cmayfield/code/games/ftk2/ftk2-save-editor
+cd /home/cmayfield/code/games/SE/ftk2-save-editor
 source .venv/bin/activate   # or: python3 -m venv .venv && pip install -e .
 
 ftk2-gui   # desktop reader (party gold, inventory, stats, JSON)

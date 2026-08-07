@@ -14,7 +14,6 @@ from ftk2_editor import (
     edit_field,
     ensure_character_herb_tool_minimum,
     encrypt_ftk2_text,
-    find_save_file,
     parse_ftk2,
     verify_save,
     xor_crypt,
@@ -192,10 +191,19 @@ def test_ensure_character_herb_tool_minimum_tops_up_scrolls(sample_run_bytes):
     assert ok is True
     assert updated == 6  # herb + tool + drink + 2 scrolls + safetystone
 
+    things = parse_ftk2(modified)["json"]["Entities"][0]["Components"]["CharacterComponent"]["Things"]
+    by_name = {entry["ConfigName"]: entry["_stackCount"] for entry in things}
+    assert by_name["SCROLL_TELEPORT_01"] == 10
+    assert by_name["SCROLL_VISION_01"] == 10
+    assert by_name["MISC_SAFETYSTONE_01"] == 10
 
 
-def test_verify_save_real_file():
-    save_path = find_save_file()
+def test_verify_save_roundtrip(sample_user_obj, tmp_path):
+    # Hermetic: verify a save written to disk by our own tooling parses back
+    # cleanly, without depending on a local game install.
+    save_path = tmp_path / "User.ftk2"
+    text = json.dumps(sample_user_obj, indent=2) + "\n"
+    save_path.write_bytes(encrypt_ftk2_text(text))
     data = save_path.read_bytes()
     result = verify_save(data)
     assert result["file_size"] > 0
