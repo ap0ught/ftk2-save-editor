@@ -46,7 +46,12 @@ from ftk2_editor import (
     replace_character_thing,
     set_character_gold,
 )
-from ftk2_editor.viewmodel import list_save_candidates, load_save_view
+from ftk2_editor.viewmodel import (
+    list_save_candidates,
+    load_save_view,
+    replacement_item_configs,
+    unique_saved_items,
+)
 
 APP_TITLE = "FTK2 Save Reader"
 MAX_TREE_CHILDREN = 200
@@ -71,6 +76,15 @@ class LoadWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class ItemCatalogWorker(QThread):
+    """Build the cross-save item catalog without blocking the GUI."""
+
+    finished_ok = Signal(object)
+
+    def run(self) -> None:
+        self.finished_ok.emit(unique_saved_items())
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -87,10 +101,14 @@ class MainWindow(QMainWindow):
         self._pending_select_guid: str | None = None
         self._pending_focus_inventory = False
         self._inventory_windows: list[QDialog] = []
+        self._item_catalog: list[dict[str, str]] = []
+        self._catalog_worker = ItemCatalogWorker(self)
+        self._catalog_worker.finished_ok.connect(self._item_catalog.extend)
 
         self._build_actions()
         self._build_ui()
         self.refresh_sidebar()
+        self._catalog_worker.start()
         self.statusBar().showMessage("Open User.ftk2 or a GameRuns save to begin.")
 
     def _build_actions(self) -> None:
@@ -463,8 +481,8 @@ class MainWindow(QMainWindow):
         same_type_box = QCheckBox("Same type")
         same_type_box.setChecked(True)
         same_type_box.setToolTip(
-            "When checked, only list items whose Type matches the selected row.\n"
-            "Uncheck to list every distinct item your party carries."
+            "When checked, match the item kind (BOW, BLUNT, HERB, etc.).\n"
+            "Uncheck to list every distinct item found across all save games."
         )
         replace_btn = QPushButton("Replace item")
         replace_btn.setEnabled(False)
@@ -494,25 +512,21 @@ class MainWindow(QMainWindow):
             entry = cell.data(Qt.ItemDataRole.UserRole)
             if not isinstance(entry, dict):
                 return
-            wanted_type = entry.get("type") if same_type_box.isChecked() else None
-            current = entry.get("config")
-            options: list[str] = []
-            seen: set[str] = set()
-            for prow in self._party_rows:
-                for pent in prow.get("inventory") or []:
-                    if wanted_type is not None and pent.get("type") != wanted_type:
-                        continue
-                    config = pent.get("config")
-                    if config and config != current and config not in seen:
-                        seen.add(config)
-                        options.append(config)
+            source = self._item_catalog or [
+                item
+                for party_row in self._party_rows
+                for item in (party_row.get("inventory") or [])
+            ]
+            options = replacement_item_configs(
+                source, entry, same_type=same_type_box.isChecked()
+            )
             if not options:
                 replace_label.setText(
-                    "Replace selected with: (no matching items carried by party)"
+                    "Replace selected with: (no matching items found in saves)"
                 )
                 return
             replace_label.setText("Replace selected with:")
-            replace_combo.addItems(sorted(options))
+            replace_combo.addItems(options)
             replace_btn.setEnabled(True)
 
         table.itemSelectionChanged.connect(_refresh_replace_options)
@@ -575,6 +589,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         self._load_generation += 1  # ignore late UI updates
         self._stop_loader()
+        self._catalog_worker.wait()
         super().closeEvent(event)
 
     def _populate_overview(self) -> None:

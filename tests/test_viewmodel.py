@@ -168,3 +168,42 @@ def test_party_from_run_helper(save):
     run = vm.load_save_view(save["run"])
     party = vm.party_from_run(run["raw"]["json"])
     assert len(party) >= 1
+
+
+def test_unique_saved_items_unions_user_and_all_main_runs(save):
+    user = _make_user()
+    user["PartyCharacters"][0]["Components"]["CharacterComponent"]["Things"].append(
+        {"ConfigName": "STAFF_HOME_01", "Type": "EQUIPMENT", "_stackCount": 1}
+    )
+    _write_ftk2(save["user"], user)
+
+    fire_run = _make_run()
+    fire_run["Entities"][0]["Components"]["CharacterComponent"]["Things"].append(
+        {"ConfigName": "BOW_FIRE_01", "Type": "EQUIPMENT", "_stackCount": 1}
+    )
+    _write_ftk2(save["runs"] / "RUN-fire.ftk2", fire_run, run=True)
+
+    items = vm.unique_saved_items()
+
+    by_config = {item["config"]: item["type"] for item in items}
+    assert by_config["STAFF_HOME_01"] == "EQUIPMENT"
+    assert by_config["BOW_FIRE_01"] == "EQUIPMENT"
+    assert [item["config"] for item in items].count("STAFF_HOME_01") == 1
+
+
+def test_replacement_item_configs_filters_by_type_and_config_family():
+    catalog = [
+        {"config": "BOW_FIRE_MEDIUM_01", "type": "EQUIPMENT"},
+        {"config": "BLUNT_SHOVEL_HEAVY_00", "type": "EQUIPMENT"},
+        {"config": "HERB_GODSBEARD", "type": "ITEM"},
+    ]
+    selected = {"config": "BOW_MILITIA_MEDIUM_00", "type": "EQUIPMENT"}
+
+    assert vm.replacement_item_configs(catalog, selected, same_type=True) == [
+        "BOW_FIRE_MEDIUM_01"
+    ]
+    assert vm.replacement_item_configs(catalog, selected, same_type=False) == [
+        "BLUNT_SHOVEL_HEAVY_00",
+        "BOW_FIRE_MEDIUM_01",
+        "HERB_GODSBEARD",
+    ]
