@@ -343,12 +343,12 @@ def ensure_character_herb_tool_minimum(
     *,
     minimum: int = 10,
 ) -> tuple[bytes, bool, int]:
-    """Ensure a run character has at least *minimum* of herb/tool/drink/scroll stacks.
+    """Ensure a run character has at least *minimum* of herb/tool/drink/scroll/thrown stacks.
 
     Matches Things whose ``ConfigName`` contains HERB / TOOL / DRINK / SCROLL /
-    SAFETYSTONE (or whose ``Type`` is HERB / TOOL), topping each stack below
-    *minimum* up to *minimum*.  Returns ``(new_data, ok, updated_entries)`` where
-    ``ok`` means the character was found in a GameRun file.
+    SAFETYSTONE / THROW (or whose ``Type`` is HERB / TOOL), topping each stack
+    below *minimum* up to *minimum*.  Returns ``(new_data, ok, updated_entries)``
+    where ``ok`` means the character was found in a GameRun file.
     """
     if minimum < 0:
         raise ValueError("minimum must be >= 0")
@@ -390,6 +390,7 @@ def ensure_character_herb_tool_minimum(
                 or "DRINK" in config
                 or "SCROLL" in config
                 or "SAFETYSTONE" in config
+                or "THROW" in config
                 or thing_type in {"HERB", "TOOL"}
             )
             if not is_herb_or_tool:
