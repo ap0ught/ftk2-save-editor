@@ -186,6 +186,19 @@ def list_save_candidates() -> list[dict[str, Any]]:
     return items
 
 
+def run_display_name(path: Path) -> str:
+    """Human-readable name for a GameRun save: its ``saveName`` when parseable, else the filename."""
+    path = Path(path)
+    try:
+        summary = parse_ftk2(path.read_bytes()).get("summary") or {}
+        name = summary.get("saveName")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    except Exception:  # noqa: BLE001 - name is cosmetic; fall back to filename
+        pass
+    return path.name
+
+
 def find_carryover_source(current: Path) -> Path | None:
     """Locate the most recent save slot of a *different* run (the previous act).
 

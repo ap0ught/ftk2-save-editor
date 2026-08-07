@@ -44,7 +44,12 @@ from ftk2_editor import (
     ensure_character_herb_tool_minimum,
     set_character_gold,
 )
-from ftk2_editor.viewmodel import find_carryover_source, list_save_candidates, load_save_view
+from ftk2_editor.viewmodel import (
+    find_carryover_source,
+    list_save_candidates,
+    load_save_view,
+    run_display_name,
+)
 
 APP_TITLE = "FTK2 Save Reader"
 MAX_TREE_CHILDREN = 200
@@ -807,14 +812,15 @@ class MainWindow(QMainWindow):
             )
             return
 
+        source_name = run_display_name(source)
         reply = QMessageBox.question(
             self,
             APP_TITLE,
-            f"Add the herbs/drinks/tools/scrolls/safetystones from\n{source.name}\n"
-            f"onto the party of {self._path.name}?\n\n"
+            f"Add the herbs/drinks/tools/scrolls/safetystones from\n{source_name} ({source.name})\n"
+            f"onto the party of {run_display_name(self._path)}?\n\n"
             "Equipment, gold and XP are not copied.\n"
-            "A .bak backup will be created if changes are needed."
-            " Quit the game first if it is running.",
+            "A .bak backup will be created if changes are needed.\n"
+            "Quit the game first if it is running.",
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
