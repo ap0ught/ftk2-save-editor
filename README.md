@@ -41,7 +41,7 @@ Uses **PySide6** for the GUI (no system `tk` package required).
 ftk2-gui
 ```
 
-Browse `User.ftk2` and `GameRuns/*.ftk2`: overview, party wallets (`CURRENCY_ADVENTURE`), inventory, stats, and a trimmed JSON tree. Export decrypted JSON from **File → Export**.
+Browse `User.ftk2` and `GameRuns/*.ftk2`: overview, party wallets (`CURRENCY_ADVENTURE`), inventory (with selected-character and whole-party top-up helpers for herbs, drinks, tools, scrolls, safetystones, thrown items, orbs, candy, and ink), stats, and a trimmed JSON tree. Export decrypted JSON from **File → Export**.
 
 ## CLI
 

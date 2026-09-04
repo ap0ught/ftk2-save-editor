@@ -4,8 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ftk2-save-editor"
-version = "0.1.0"
+version = "0.2.0"
 description = "Read and edit For The King II (FTK2) User.ftk2 save files"
+readme = "README.md"
 authors = [{name = "Hermes Agent"}]
 requires-python = ">=3.10"
 dependencies = [

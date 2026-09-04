@@ -15,6 +15,7 @@ from ftk2_editor import (
     dump_summary,
     edit_field,
     ensure_character_herb_tool_minimum,
+    ensure_party_herb_tool_minimum,
     encrypt_ftk2_text,
     parse_ftk2,
     replace_character_thing,
@@ -182,6 +183,9 @@ def test_ensure_character_herb_tool_minimum_tops_up_scrolls(sample_run_bytes):
     things.append({"ConfigName": "SCROLL_TELEPORT_01", "Type": "ITEM", "_stackCount": 1})
     things.append({"ConfigName": "SCROLL_VISION_01", "Type": "ITEM", "_stackCount": 1})
     things.append({"ConfigName": "MISC_SAFETYSTONE_01", "Type": "ITEM", "_stackCount": 1})
+    things.append({"ConfigName": "ORB_FORTUNETELLER_BASIC_00", "Type": "EQUIPMENT", "_stackCount": 1})
+    things.append({"ConfigName": "CANDY_LUCK", "Type": "ITEM", "_stackCount": 1})
+    things.append({"ConfigName": "MISC_INK", "Type": "ITEM", "_stackCount": 1})
     summary = {"runID": "run-123", "saveName": "Test Expedition", "difficulty": "normal"}
     text = f"//**{json.dumps(summary)}**//\n{json.dumps(run, indent=2)}\n"
     with_scrolls = encrypt_ftk2_text(text)
@@ -192,13 +196,82 @@ def test_ensure_character_herb_tool_minimum_tops_up_scrolls(sample_run_bytes):
         minimum=10,
     )
     assert ok is True
-    assert updated == 6  # herb + tool + drink + 2 scrolls + safetystone
+    assert updated == 9  # herb + tool + drink + 2 scrolls + safetystone + orb + candy + ink
 
     things = parse_ftk2(modified)["json"]["Entities"][0]["Components"]["CharacterComponent"]["Things"]
     by_name = {entry["ConfigName"]: entry["_stackCount"] for entry in things}
     assert by_name["SCROLL_TELEPORT_01"] == 10
     assert by_name["SCROLL_VISION_01"] == 10
     assert by_name["MISC_SAFETYSTONE_01"] == 10
+    assert by_name["ORB_FORTUNETELLER_BASIC_00"] == 10
+    assert by_name["CANDY_LUCK"] == 10
+    assert by_name["MISC_INK"] == 10
+
+
+def test_ensure_party_herb_tool_minimum_tops_up_everyone():
+    run = {
+        "Entities": [
+            {
+                "Guid": "hero-1",
+                "Components": {
+                    "CharacterComponent": {
+                        "DisplayName": "Hero",
+                        "ConfigName": "HUNTER",
+                        "Things": [
+                            {"ConfigName": "HERB_HEALING", "Type": "ITEM", "_stackCount": 2},
+                        ],
+                    },
+                    "PlayerComponent": {"IsPlayer": True},
+                },
+            },
+            {
+                "Guid": "hero-2",
+                "Components": {
+                    "CharacterComponent": {
+                        "DisplayName": "Sidekick",
+                        "ConfigName": "BLACKSMITH",
+                        "Things": [
+                            {"ConfigName": "TOOL_LOCKPICK", "Type": "ITEM", "_stackCount": 1},
+                            {"ConfigName": "ORB_LIGHTNING_LIGHT_00", "Type": "EQUIPMENT", "_stackCount": 1},
+                        ],
+                    },
+                    "PlayerComponent": {"IsPlayer": True},
+                },
+            },
+            {
+                "Guid": "merc-1",
+                "Components": {
+                    "CharacterComponent": {
+                        "DisplayName": "Merc",
+                        "ConfigName": "MERC_GUN_BASIC_04",
+                        "CharacterType": "MERCENARY",
+                        "Things": [
+                            {"ConfigName": "HERB_HEALING", "Type": "ITEM", "_stackCount": 1},
+                        ],
+                    },
+                },
+            },
+        ]
+    }
+    summary = {"runID": "run-123", "saveName": "Test Expedition", "difficulty": "normal"}
+    blob = encrypt_ftk2_text(f"//**{json.dumps(summary)}**//\n{json.dumps(run, indent=2)}\n")
+
+    # Library helper is guid-list driven, so passing only the two player guids
+    # naturally skips the mercenary.  That mirrors the GUI filter.
+    modified, ok, updated = ensure_party_herb_tool_minimum(
+        blob, ["hero-1", "hero-2"], minimum=10
+    )
+    assert ok is True
+    assert updated == 3
+
+    parsed = parse_ftk2(modified)["json"]
+    things1 = parsed["Entities"][0]["Components"]["CharacterComponent"]["Things"]
+    things2 = parsed["Entities"][1]["Components"]["CharacterComponent"]["Things"]
+    merc_things = parsed["Entities"][2]["Components"]["CharacterComponent"]["Things"]
+    assert things1[0]["_stackCount"] == 10
+    assert things2[0]["_stackCount"] == 10
+    assert things2[1]["_stackCount"] == 10
+    assert merc_things[0]["_stackCount"] == 1  # not touched
 
 
 def test_replace_character_thing_swaps_config_name():

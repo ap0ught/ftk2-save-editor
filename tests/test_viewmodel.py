@@ -268,6 +268,13 @@ def test_followers_surface_in_party(save):
     np_guids = {row.get("guid") for row in view["non_party"]}
     assert "follower-1" not in np_guids
     assert "follower-2" not in np_guids
+    # Player-controlled party members carry this flag; followers do not.
+    assert any(row.get("has_player_component") for row in view["party"])
+    assert any(
+        not row.get("has_player_component")
+        and row.get("character_type") in ("COMPANION", "MERCENARY")
+        for row in view["party"]
+    )
 
 
 def test_malformed_player_followers_shape_is_ignored(save):

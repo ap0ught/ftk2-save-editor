@@ -45,6 +45,7 @@ from ftk2_editor import (
     carry_over_consumables,
     decrypt_ftk2_bytes,
     ensure_character_herb_tool_minimum,
+    ensure_party_herb_tool_minimum,
     replace_character_thing,
     set_character_gold,
 )
@@ -226,11 +227,19 @@ class MainWindow(QMainWindow):
         edit_row.addWidget(self.apply_gold_btn)
         self.apply_all_gold_btn = QPushButton("Apply to all party")
         self.apply_all_gold_btn.setEnabled(False)
-        self.apply_all_gold_btn.setToolTip("Set every party member’s wallet to the selected gold amount")
+        self.apply_all_gold_btn.setToolTip("Set every real party member’s wallet to the selected gold amount (followers/mercs excluded)")
         self.apply_all_gold_btn.clicked.connect(self.apply_gold_to_all_party)
         edit_row.addWidget(self.apply_all_gold_btn)
+
+        self.topup_party_btn = QPushButton("Top up party consumables")
+        self.topup_party_btn.setEnabled(False)
+        self.topup_party_btn.setToolTip(
+            "Set every herb/tool/drink/scroll/safetystone/thrown/orb/candy/MISC_INK stack below 10 to 10 for all party members"
+        )
+        self.topup_party_btn.clicked.connect(self.apply_party_herb_tool_topup)
+        edit_row.addWidget(self.topup_party_btn)
         edit_row.addStretch(1)
-        self.gold_hint = QLabel("Open a GameRuns/*.ftk2 save, select a character, set gold.")
+        self.gold_hint = QLabel("Open a GameRuns/*.ftk2 save, select a character, set gold or top-up consumables.")
         self.gold_hint.setStyleSheet("color: #9aa3ad;")
         edit_row.addWidget(self.gold_hint)
         party_layout.addLayout(edit_row)
@@ -260,10 +269,10 @@ class MainWindow(QMainWindow):
         self.inventory_label.setStyleSheet("color: #9aa3ad;")
         inv_layout.addWidget(self.inventory_label)
         inv_action_row = QHBoxLayout()
-        self.topup_herb_tool_btn = QPushButton("Set herbs/tools/drinks/scrolls/safetystones/thrown to min 10")
+        self.topup_herb_tool_btn = QPushButton("Top up selected character")
         self.topup_herb_tool_btn.setEnabled(False)
         self.topup_herb_tool_btn.setToolTip(
-            "For selected character, set every herb/tool/drink/scroll/safetystone/thrown stack below 10 up to 10"
+            "For selected character, set every herb/tool/drink/scroll/safetystone/thrown/orb/candy/MISC_INK stack below 10 up to 10"
         )
         self.topup_herb_tool_btn.clicked.connect(self.apply_inventory_herb_tool_topup)
         inv_action_row.addWidget(self.topup_herb_tool_btn)
@@ -791,6 +800,9 @@ class MainWindow(QMainWindow):
         self.apply_all_gold_btn.setEnabled(enabled)
         for btn in self._gold_preset_buttons:
             btn.setEnabled(enabled)
+        self.topup_party_btn.setEnabled(
+            self._view is not None and self._view.get("kind") == "run"
+        )
 
     def _set_inventory_controls_enabled(self, enabled: bool) -> None:
         self.topup_herb_tool_btn.setEnabled(enabled)
@@ -896,9 +908,12 @@ class MainWindow(QMainWindow):
                 "Open a GameRuns/*.ftk2 expedition save to edit wallet gold.",
             )
             return
-        targets = [row for row in self._party_rows if row.get("guid")]
+        targets = [
+            row for row in self._party_rows
+            if row.get("guid") and row.get("has_player_component")
+        ]
         if not targets:
-            QMessageBox.information(self, APP_TITLE, "No party characters with Guids found.")
+            QMessageBox.information(self, APP_TITLE, "No player-controlled party members with Guids found.")
             return
         gold = int(self.gold_spin.value())
         names = ", ".join(str(row.get("name")) for row in targets)
@@ -970,7 +985,7 @@ class MainWindow(QMainWindow):
         reply = QMessageBox.question(
             self,
             APP_TITLE,
-            f"Set all herb/tool/drink/scroll/safetystone/thrown stacks below 10 to 10 for {row.get('name')}?\n\n"
+            f"Set all herb/tool/drink/scroll/safetystone/thrown/orb/candy/MISC_INK stacks below 10 to 10 for {row.get('name')}?\n\n"
             f"File: {self._path}\n"
             "A .bak backup will be created if changes are needed."
             " Quit the game first if it is running.",
@@ -991,16 +1006,78 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(
                     self,
                     APP_TITLE,
-                    f"No herb/tool/drink/scroll/safetystone/thrown stacks below 10 for {row.get('name')}.",
+                    f"{row.get('name')} is already topped up.\n\n"
+                    "Every existing herb, tool, drink, scroll, safetystone, thrown item, orb, candy, "
+                    "and MISC_INK stack is at least 10.\n\n"
+                    "No changes were made and no backup was created.",
                 )
                 return
 
             bak = backup(self._path)
             self._path.write_bytes(modified)
             self.statusBar().showMessage(
-                f"Updated {updated} herb/tool/drink/scroll/safetystone/thrown stacks for {row.get('name')} (backup {bak.name})"
+                f"Updated {updated} herb/tool/drink/scroll/safetystone/thrown/orb/candy/MISC_INK stacks for {row.get('name')} (backup {bak.name})"
             )
             self._pending_select_guid = str(guid)
+            self._pending_focus_inventory = True
+            self.load_path(self._path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, APP_TITLE, f"Save failed:\n{exc}")
+
+    def apply_party_herb_tool_topup(self) -> None:
+        if not self._path or not self._view or self._view.get("kind") != "run":
+            QMessageBox.warning(
+                self,
+                APP_TITLE,
+                "Open a GameRuns/*.ftk2 expedition save to edit party inventory.",
+            )
+            return
+        targets = [
+            row for row in self._party_rows
+            if row.get("guid") and row.get("has_player_component")
+        ]
+        if not targets:
+            QMessageBox.information(self, APP_TITLE, "No player-controlled party members with Guids found.")
+            return
+        names = ", ".join(str(row.get("name")) for row in targets)
+        reply = QMessageBox.question(
+            self,
+            APP_TITLE,
+            "Set all herb/tool/drink/scroll/safetystone/thrown/orb/candy/MISC_INK stacks below 10 to 10 for all party members?\n\n"
+            f"{names}\n\n"
+            f"File: {self._path}\n"
+            "A .bak backup will be created if changes are needed."
+            " Quit the game first if it is running.",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            guids = [str(row["guid"]) for row in targets]
+            data = self._path.read_bytes()
+            modified, ok, updated = ensure_party_herb_tool_minimum(
+                data,
+                guids,
+                minimum=10,
+            )
+            if not ok:
+                QMessageBox.critical(self, APP_TITLE, "Could not find any party members in the run.")
+                return
+            if updated == 0:
+                QMessageBox.information(
+                    self,
+                    APP_TITLE,
+                    "The party is already topped up.\n\n"
+                    "Every existing herb, tool, drink, scroll, safetystone, thrown item, orb, candy, "
+                    "and MISC_INK stack is at least 10.\n\n"
+                    "No changes were made and no backup was created.",
+                )
+                return
+            bak = backup(self._path)
+            self._path.write_bytes(modified)
+            self.statusBar().showMessage(
+                f"Updated {updated} herb/tool/drink/scroll/safetystone/thrown/orb/candy/MISC_INK stacks across {len(targets)} characters (backup {bak.name})"
+            )
+            self._pending_select_guid = str(targets[0]["guid"])
             self._pending_focus_inventory = True
             self.load_path(self._path)
         except Exception as exc:  # noqa: BLE001

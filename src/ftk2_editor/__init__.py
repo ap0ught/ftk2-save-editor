@@ -488,9 +488,10 @@ def ensure_character_herb_tool_minimum(
     """Ensure a character has minimum consumable stacks, including safetystones and thrown items.
 
     Matches Things whose ``ConfigName`` contains HERB / TOOL / DRINK / SCROLL /
-    SAFETYSTONE / THROW (or whose ``Type`` is HERB / TOOL), topping each stack
-    below *minimum* up to *minimum*.  Returns ``(new_data, ok, updated_entries)``
-    where ``ok`` means the character was found in a GameRun file.
+    SAFETYSTONE / THROW / ORB / CANDY / MISC_INK (or whose ``Type`` is HERB / TOOL),
+    topping each stack below *minimum* up to *minimum*.  Returns ``(new_data, ok,
+    updated_entries)`` where ``ok`` means the character was found in a GameRun
+    file.
     """
     if minimum < 0:
         raise ValueError("minimum must be >= 0")
@@ -533,6 +534,9 @@ def ensure_character_herb_tool_minimum(
                 or "SCROLL" in config
                 or "SAFETYSTONE" in config
                 or "THROW" in config
+                or "ORB" in config
+                or "CANDY" in config
+                or "MISC_INK" in config
                 or thing_type in {"HERB", "TOOL"}
             )
             if not is_supported_consumable:
@@ -556,11 +560,94 @@ def ensure_character_herb_tool_minimum(
     return encrypt_ftk2_text(new_plain), True, updated_entries
 
 
-CONSUMABLE_TOKENS = ("HERB", "DRINK", "TOOL", "SCROLL", "SAFETYSTONE")
+def ensure_party_herb_tool_minimum(
+    data: bytes,
+    guids: list[str],
+    *,
+    minimum: int = 10,
+) -> tuple[bytes, bool, int]:
+    """Top up consumables for every party member listed in *guids*.
+
+    Unlike repeatedly calling ``ensure_character_herb_tool_minimum`` (which
+    decrypts/encrypts once per guid), this parses the GameRun once, mutates
+    each character's Things in a single pass, and serializes once.
+    """
+    if minimum < 0:
+        raise ValueError("minimum must be >= 0")
+    if not guids:
+        return data, False, 0
+
+    plain = decrypt_ftk2_bytes(data)
+    parts = _split_gamerun_plain(plain)
+    if parts is None:
+        return data, False, 0
+    summary_text, body_text, joiner = parts
+    try:
+        run = json.loads(body_text)
+    except json.JSONDecodeError:
+        return data, False, 0
+
+    entities = run.get("Entities")
+    if not isinstance(entities, list):
+        return data, False, 0
+
+    guid_set = set(guids)
+    total_updated = 0
+    any_found = False
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        guid = entity.get("Guid")
+        if guid not in guid_set:
+            continue
+        any_found = True
+        comps = entity.get("Components") or {}
+        cc = comps.get("CharacterComponent") or {}
+        things = cc.get("Things") or []
+        if not isinstance(things, list):
+            continue
+        for thing in things:
+            if not isinstance(thing, dict):
+                continue
+            config = str(thing.get("ConfigName") or "").upper()
+            thing_type = str(thing.get("Type") or "").upper()
+            is_supported_consumable = (
+                "HERB" in config
+                or "TOOL" in config
+                or "DRINK" in config
+                or "SCROLL" in config
+                or "SAFETYSTONE" in config
+                or "THROW" in config
+                or "ORB" in config
+                or "CANDY" in config
+                or "MISC_INK" in config
+                or thing_type in {"HERB", "TOOL"}
+            )
+            if not is_supported_consumable:
+                continue
+            try:
+                count = int(thing.get("_stackCount") or 0)
+            except (TypeError, ValueError):
+                count = 0
+            if count < minimum:
+                thing["_stackCount"] = int(minimum)
+                total_updated += 1
+
+    if not any_found:
+        return data, False, 0
+    if total_updated == 0:
+        return data, True, 0
+
+    new_body = _dump_json_matching_newlines(run, body_text)
+    new_plain = f"//**{summary_text}**//{joiner}{new_body}"
+    return encrypt_ftk2_text(new_plain), True, total_updated
+
+
+CONSUMABLE_TOKENS = ("HERB", "DRINK", "TOOL", "SCROLL", "SAFETYSTONE", "ORB", "CANDY", "MISC_INK")
 
 
 def _is_consumable(thing: dict[str, Any]) -> bool:
-    """True for non-equipment, non-currency, non-XP consumables (herbs, drinks, tools, scrolls, safetystones)."""
+    """True for non-equipment, non-currency, non-XP consumables (herbs, drinks, tools, scrolls, safetystones, orbs, candy, MISC_INK)."""
     config = str(thing.get("ConfigName") or "").upper()
     thing_type = str(thing.get("Type") or "").upper()
     if thing_type in {"EQUIPMENT", "PASSIVE"} or config == "CURRENCY_ADVENTURE":

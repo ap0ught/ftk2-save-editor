@@ -11,3 +11,4 @@ decompiled/*.decrypted.*
 decompiled/User.decrypted.json
 decompiled/GameRun.sample.decrypted.txt
 .pytest_cache/
+/src/ftk2_editor/Necesse_Save_Editor.ini
