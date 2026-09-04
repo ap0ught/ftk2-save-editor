@@ -50,6 +50,8 @@ jobs:
           pattern: dist-*
           path: dist/
           merge-multiple: true
+      - name: Install release dependencies
+        run: python -m pip install twine
       - name: Verify dist contents
         run: |
           ls -la dist/
