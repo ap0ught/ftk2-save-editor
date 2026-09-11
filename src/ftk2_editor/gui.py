@@ -46,6 +46,7 @@ from ftk2_editor import (
     decrypt_ftk2_bytes,
     ensure_character_herb_tool_minimum,
     ensure_party_herb_tool_minimum,
+    ensure_party_food_minimum,
     rename_party_member_synced,
     replace_character_thing,
     give_carnival_wheel_piece,
@@ -241,6 +242,14 @@ class MainWindow(QMainWindow):
         )
         self.topup_party_btn.clicked.connect(self.apply_party_herb_tool_topup)
         edit_row.addWidget(self.topup_party_btn)
+        self.topup_snacks_btn = QPushButton("Top up party snacks to 10")
+        self.topup_snacks_btn.setEnabled(False)
+        self.topup_snacks_btn.setToolTip(
+            "Set every snickerdoodle (SNICKERDOODLE_BASIC_01) and hotdog (HOTDOG_BASIC_01) "
+            "stack below 10 to 10 for all party members"
+        )
+        self.topup_snacks_btn.clicked.connect(self.apply_party_food_topup)
+        edit_row.addWidget(self.topup_snacks_btn)
 
         edit_row.addSpacing(24)
         edit_row.addWidget(QLabel("Name"))
@@ -841,6 +850,9 @@ class MainWindow(QMainWindow):
         self.topup_party_btn.setEnabled(
             self._view is not None and self._view.get("kind") == "run"
         )
+        self.topup_snacks_btn.setEnabled(
+            self._view is not None and self._view.get("kind") == "run"
+        )
 
     def _set_inventory_controls_enabled(self, enabled: bool) -> None:
         self.topup_herb_tool_btn.setEnabled(enabled)
@@ -1186,6 +1198,61 @@ class MainWindow(QMainWindow):
             self._path.write_bytes(modified)
             self.statusBar().showMessage(
                 f"Updated {updated} herb/tool/drink/scroll/safetystone/thrown/orb/candy/MISC_INK stacks across {len(targets)} characters (backup {bak.name})"
+            )
+            self._pending_select_guid = str(targets[0]["guid"])
+            self._pending_focus_inventory = True
+            self.load_path(self._path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, APP_TITLE, f"Save failed:\n{exc}")
+
+    def apply_party_food_topup(self) -> None:
+        if not self._path or not self._view or self._view.get("kind") != "run":
+            QMessageBox.warning(
+                self,
+                APP_TITLE,
+                "Open a GameRuns/*.ftk2 expedition save to top up party snacks.",
+            )
+            return
+        targets = [
+            row for row in self._party_rows
+            if row.get("guid") and row.get("has_player_component")
+        ]
+        if not targets:
+            QMessageBox.information(self, APP_TITLE, "No player-controlled party members with Guids found.")
+            return
+        names = ", ".join(str(row.get("name")) for row in targets)
+        reply = QMessageBox.question(
+            self,
+            APP_TITLE,
+            "Set every snickerdoodle (SNICKERDOODLE_BASIC_01) and hotdog (HOTDOG_BASIC_01) "
+            "stack below 10 to 10 for all party members?\n\n"
+            f"{names}\n\n"
+            f"File: {self._path}\n"
+            "A .bak backup will be created if changes are needed."
+            " Quit the game first if it is running.",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            guids = [str(row["guid"]) for row in targets]
+            data = self._path.read_bytes()
+            modified, ok, updated = ensure_party_food_minimum(data, guids, minimum=10)
+            if not ok:
+                QMessageBox.critical(self, APP_TITLE, "Could not find any party members in the run.")
+                return
+            if updated == 0:
+                QMessageBox.information(
+                    self,
+                    APP_TITLE,
+                    "The party's snacks are already topped up.\n\n"
+                    "Every existing snickerdoodle and hotdog stack is at least 10.\n\n"
+                    "No changes were made and no backup was created.",
+                )
+                return
+            bak = backup(self._path)
+            self._path.write_bytes(modified)
+            self.statusBar().showMessage(
+                f"Updated {updated} snack stacks (snickerdoodle/hotdog to 10) across {len(targets)} characters (backup {bak.name})"
             )
             self._pending_select_guid = str(targets[0]["guid"])
             self._pending_focus_inventory = True

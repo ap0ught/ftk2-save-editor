@@ -17,6 +17,7 @@ from ftk2_editor import (
     edit_field,
     ensure_character_herb_tool_minimum,
     ensure_party_herb_tool_minimum,
+    ensure_party_food_minimum,
     encrypt_ftk2_text,
     parse_ftk2,
     rename_party_member,
@@ -994,6 +995,67 @@ def test_give_carnival_wheel_piece_not_gamerun_fails(sample_user_obj):
     blob = encrypt_ftk2_text(json.dumps(sample_user_obj, indent=2) + "\n")
     modified, ok = give_carnival_wheel_piece(blob, "hero-1")
     assert ok is False
+    assert modified is blob
+
+
+def _snack_run_blob() -> bytes:
+    summary = {"runID": "snack", "saveName": "S", "difficulty": "normal"}
+    run = {
+        "Entities": [
+            {"Guid": "hero-1", "Components": {"CharacterComponent": {"DisplayName": "A", "ConfigName": "HUNTER", "Things": [
+                {"ConfigName": "SNICKERDOODLE_BASIC_01", "Type": "ITEM", "_stackCount": 3},
+                {"ConfigName": "HOTDOG_BASIC_01", "Type": "ITEM", "_stackCount": 1},
+            ]}}},
+            {"Guid": "hero-2", "Components": {"CharacterComponent": {"DisplayName": "B", "ConfigName": "MONK", "Things": [
+                {"ConfigName": "SNICKERDOODLE_BASIC_01", "Type": "ITEM", "_stackCount": 7},
+                {"ConfigName": "HERB_HEALING", "Type": "ITEM", "_stackCount": 4},
+            ]}}},
+        ]
+    }
+    return encrypt_ftk2_text(f"//**{json.dumps(summary)}**//\n{json.dumps(run)}\n")
+
+
+def test_ensure_party_food_minimum_tops_up_snacks():
+    modified, ok, updated = ensure_party_food_minimum(
+        _snack_run_blob(), ["hero-1", "hero-2"], minimum=10
+    )
+    assert ok is True
+    assert updated == 3  # two snacks + one snack
+    run = parse_ftk2(modified)["json"]
+    a = {t["ConfigName"]: t["_stackCount"] for t in run["Entities"][0]["Components"]["CharacterComponent"]["Things"]}
+    b = {t["ConfigName"]: t["_stackCount"] for t in run["Entities"][1]["Components"]["CharacterComponent"]["Things"]}
+    assert a["SNICKERDOODLE_BASIC_01"] == 10
+    assert a["HOTDOG_BASIC_01"] == 10
+    assert b["SNICKERDOODLE_BASIC_01"] == 10
+    assert b["HERB_HEALING"] == 4  # not a snack, untouched
+
+
+def test_ensure_party_food_minimum_leaves_already_high():
+    blob = _snack_run_blob()
+    modified, ok, updated = ensure_party_food_minimum(
+        blob, ["hero-1", "hero-2"], minimum=10
+    )
+    again, ok2, updated2 = ensure_party_food_minimum(
+        modified, ["hero-1", "hero-2"], minimum=10
+    )
+    assert ok2 is True
+    assert updated2 == 0
+    assert again is modified
+
+
+def test_ensure_party_food_minimum_empty_guids():
+    blob = _snack_run_blob()
+    modified, ok, updated = ensure_party_food_minimum(blob, [], minimum=10)
+    assert ok is False
+    assert updated == 0
+    assert modified is blob
+
+
+def test_ensure_party_food_minimum_not_gamerun_fails(sample_user_obj):
+    blob = encrypt_ftk2_text(json.dumps(sample_user_obj, indent=2) + "\n")
+    modified, ok, updated = ensure_party_food_minimum(blob, ["hero-1"], minimum=10)
+    assert ok is False
+    assert updated == 0
     assert modified is blob
 
 

@@ -13,13 +13,15 @@ from ftk2_editor import (
     dump_summary,
     edit_field,
     encrypt_ftk2_text,
+    ensure_party_food_minimum,
     find_save_file,
-    parse_ftk2,
     give_carnival_wheel_piece,
+    parse_ftk2,
     rename_party_member_synced,
     set_carnival_tickets,
     verify_save,
 )
+from ftk2_editor.viewmodel import party_from_run
 
 
 def main() -> None:
@@ -73,6 +75,11 @@ def main() -> None:
         default=None,
         help="Give one Carnival Wheel piece (MISC_WHEELPIECE_01, full-heal) "
         "to the character with this GUID",
+    )
+    parser.add_argument(
+        "--snacks-to-10",
+        action="store_true",
+        help="Top up every party member's snickerdoodle/hotdog stacks to 10",
     )
     parser.add_argument(
         "--no-backup",
@@ -143,7 +150,11 @@ def main() -> None:
         sys.exit(0)
 
     if args.info or args.dump or not (
-        args.updates or args.renames or args.tickets is not None or args.wheel_piece is not None
+        args.updates
+        or args.renames
+        or args.tickets is not None
+        or args.wheel_piece is not None
+        or args.snacks_to_10
     ):
         print(f"Save file: {save_path}")
         print(f"Size: {verification['file_size']} bytes")
@@ -186,6 +197,18 @@ def main() -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
+
+    if args.snacks_to_10:
+        rows = party_from_run(parse_ftk2(modified)["json"])
+        guids = [str(r["guid"]) for r in rows if r.get("has_player_component") and r.get("guid")]
+        if not guids:
+            print("  Warning: No player-controlled party members found for snack top-up", file=sys.stderr)
+            sys.exit(1)
+        modified, ok, updated = ensure_party_food_minimum(modified, guids, minimum=10)
+        if updated:
+            print(f"  Topped {updated} snickerdoodle/hotdog stacks to 10")
+        else:
+            print("  Party snacks already at 10 or no snack stacks found")
 
     is_run = decrypt_ftk2_bytes(modified).lstrip().startswith("//**")
     user_path: Path | None = None

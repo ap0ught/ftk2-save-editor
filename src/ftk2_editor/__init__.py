@@ -919,6 +919,77 @@ def ensure_party_herb_tool_minimum(
     return encrypt_ftk2_text(new_plain), True, total_updated
 
 
+def ensure_party_food_minimum(
+    data: bytes,
+    guids: list[str],
+    *,
+    minimum: int = 10,
+    configs: tuple[str, ...] = ("SNICKERDOODLE_BASIC_01", "HOTDOG_BASIC_01"),
+) -> tuple[bytes, bool, int]:
+    """Top up the party's snack stacks (snickerdoodles / hotdogs) to *minimum*.
+
+    Single-pass over the run for all *guids* (like
+    ``ensure_party_herb_tool_minimum``).  Only existing stacks are raised;
+    characters with none are left alone.
+    """
+    if minimum < 0:
+        raise ValueError("minimum must be >= 0")
+    if not guids:
+        return data, False, 0
+
+    plain = decrypt_ftk2_bytes(data)
+    parts = _split_gamerun_plain(plain)
+    if parts is None:
+        return data, False, 0
+    summary_text, body_text, joiner = parts
+    try:
+        run = json.loads(body_text)
+    except json.JSONDecodeError:
+        return data, False, 0
+
+    entities = run.get("Entities")
+    if not isinstance(entities, list):
+        return data, False, 0
+
+    config_set = {str(c).upper() for c in configs}
+    guid_set = set(guids)
+    total_updated = 0
+    any_found = False
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        guid = entity.get("Guid")
+        if guid not in guid_set:
+            continue
+        any_found = True
+        comps = entity.get("Components") or {}
+        cc = comps.get("CharacterComponent") or {}
+        things = cc.get("Things") or []
+        if not isinstance(things, list):
+            continue
+        for thing in things:
+            if not isinstance(thing, dict):
+                continue
+            if str(thing.get("ConfigName") or "").upper() not in config_set:
+                continue
+            try:
+                count = int(thing.get("_stackCount") or 0)
+            except (TypeError, ValueError):
+                count = 0
+            if count < minimum:
+                thing["_stackCount"] = int(minimum)
+                total_updated += 1
+
+    if not any_found:
+        return data, False, 0
+    if total_updated == 0:
+        return data, True, 0
+
+    new_body = _dump_json_matching_newlines(run, body_text)
+    new_plain = f"//**{summary_text}**//{joiner}{new_body}"
+    return encrypt_ftk2_text(new_plain), True, total_updated
+
+
 CONSUMABLE_TOKENS = ("HERB", "DRINK", "TOOL", "SCROLL", "SAFETYSTONE", "ORB", "CANDY", "MISC_INK")
 
 
