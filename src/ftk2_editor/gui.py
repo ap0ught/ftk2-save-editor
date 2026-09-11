@@ -995,11 +995,25 @@ class MainWindow(QMainWindow):
             if not ok:
                 QMessageBox.critical(self, APP_TITLE, "Could not find that character in the run.")
                 return
-            self._path.write_bytes(modified)
-            msg = f"Renamed {old_name!r} -> {new_name!r} (backup {bak.name})"
-            if user_modified is not None and user_path is not None:
+            # Preflight both backups before writing anything, then commit the
+            # User roster + run together; on failure roll the written file back
+            # from its backup so the two can never disagree.
+            user_bak: Path | None = None
+            user_original: bytes | None = None
+            if user_path is not None and user_modified is not None:
                 user_bak = backup(user_path)
-                user_path.write_bytes(user_modified)
+                user_original = user_path.read_bytes()
+            try:
+                if user_bak is not None and user_path is not None and user_modified is not None:
+                    user_path.write_bytes(user_modified)
+                self._path.write_bytes(modified)
+            except Exception:
+                if user_bak is not None and user_original is not None and user_path is not None:
+                    user_path.write_bytes(user_original)
+                self._path.write_bytes(data)
+                raise
+            msg = f"Renamed {old_name!r} -> {new_name!r} (backup {bak.name})"
+            if user_bak is not None and user_path is not None:
                 msg += f" + {user_path.name} roster (backup {user_bak.name})"
             self.statusBar().showMessage(msg)
             self.load_path(self._path)
@@ -1007,19 +1021,12 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, APP_TITLE, f"Save failed:\n{exc}")
 
     def _locate_user_save(self) -> Path | None:
-        """Find the User.ftk2 save next to the run file, if it exists."""
-        if self._path:
-            candidate = self._path.parent.parent / "User.ftk2"
-            if candidate.exists():
-                return candidate
-        try:
-            from ftk2_editor import find_save_file
-
-            candidate = find_save_file()
-            if candidate.exists():
-                return candidate
-        except Exception:  # noqa: BLE001
-            pass
+        """The User.ftk2 two folders above the run (sibling of GameRuns/), if present."""
+        if not self._path:
+            return None
+        candidate = self._path.parent.parent / "User.ftk2"
+        if candidate.exists() and candidate != self._path:
+            return candidate
         return None
 
     def apply_gold_to_all_party(self) -> None:

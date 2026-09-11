@@ -922,6 +922,21 @@ def test_set_carnival_tickets_negative_raises():
         set_carnival_tickets(_run_blob_with_tickets(), -1)
 
 
+def test_set_carnival_tickets_rejects_float_and_bool():
+    with pytest.raises(ValueError):
+        set_carnival_tickets(_run_blob_with_tickets(), 6.9)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        set_carnival_tickets(_run_blob_with_tickets(), True)
+
+
+def test_set_carnival_tickets_non_mapping_body_fails():
+    summary = {"runID": "r", "saveName": "s", "difficulty": "normal"}
+    blob = encrypt_ftk2_text(f"//**{json.dumps(summary)}**//\n[]\n")
+    modified, ok = set_carnival_tickets(blob, 50)
+    assert ok is False
+    assert modified is blob
+
+
 def test_set_carnival_tickets_adds_missing_key():
     summary = {"runID": "r", "saveName": "s", "difficulty": "normal"}
     run = {"Entities": [], "ItemPools": {"CURRENCY_LORE": 5}}
@@ -1053,6 +1068,15 @@ def test_ensure_party_food_minimum_empty_guids():
 
 def test_ensure_party_food_minimum_not_gamerun_fails(sample_user_obj):
     blob = encrypt_ftk2_text(json.dumps(sample_user_obj, indent=2) + "\n")
+    modified, ok, updated = ensure_party_food_minimum(blob, ["hero-1"], minimum=10)
+    assert ok is False
+    assert updated == 0
+    assert modified is blob
+
+
+def test_ensure_party_food_minimum_non_mapping_body_fails():
+    summary = {"runID": "r", "saveName": "s", "difficulty": "normal"}
+    blob = encrypt_ftk2_text(f"//**{json.dumps(summary)}**//\n[]\n")
     modified, ok, updated = ensure_party_food_minimum(blob, ["hero-1"], minimum=10)
     assert ok is False
     assert updated == 0

@@ -559,8 +559,8 @@ def set_carnival_tickets(
     dict.  The Dark Carnival dungeon branches gate on this pool
     (``DungeonState.ChoiceStack[*].KeyItem`` / ``KeyAmount``).
     """
-    if not isinstance(amount, (int, float)) or amount < 0:
-        raise ValueError("amount must be >= 0")
+    if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
+        raise ValueError("amount must be a non-negative integer")
     plain = decrypt_ftk2_bytes(data)
     parts = _split_gamerun_plain(plain)
     if parts is None:
@@ -569,6 +569,8 @@ def set_carnival_tickets(
     try:
         run = json.loads(body_text)
     except json.JSONDecodeError:
+        return data, False
+    if not isinstance(run, dict):
         return data, False
     pools = run.get("ItemPools")
     if not isinstance(pools, dict):
@@ -945,6 +947,8 @@ def ensure_party_food_minimum(
     try:
         run = json.loads(body_text)
     except json.JSONDecodeError:
+        return data, False, 0
+    if not isinstance(run, dict):
         return data, False, 0
 
     entities = run.get("Entities")
