@@ -479,6 +479,89 @@ def set_character_gold(
     return encrypt_ftk2_text(new_plain), True
 
 
+def rename_party_member(
+    data: bytes,
+    new_name: str,
+    *,
+    guid: str | None = None,
+    current_name: str | None = None,
+) -> tuple[bytes, bool]:
+    """Rename a party character's ``CharacterComponent.DisplayName``.
+
+    Works on both GameRun files (``//**summary**//`` + ``GameRunData``) and
+    User.ftk2 (``PartyCharacters``). Identify the character either by its
+    unique ``Guid`` (guid wins when both are given) or by its exact current
+    ``DisplayName``. Fail-closed: returns ``(data, False)`` when the match is
+    missing or not unique, when ``new_name`` is blank, or when the save /
+    character structure is invalid.
+    """
+    if not isinstance(new_name, str) or not new_name.strip():
+        return data, False
+    if not guid and not current_name:
+        return data, False
+
+    plain = decrypt_ftk2_bytes(data)
+    parts = _split_gamerun_plain(plain)
+    if parts is not None:
+        summary_text, body_text, joiner = parts
+        try:
+            payload = json.loads(body_text)
+        except json.JSONDecodeError:
+            return data, False
+        sample_text = body_text
+    else:
+        try:
+            payload = json.loads(plain)
+        except json.JSONDecodeError:
+            return data, False
+        summary_text = plain
+        joiner = None
+        sample_text = plain
+
+    if not isinstance(payload, dict):
+        return data, False
+    if "Entities" in payload:
+        entities = payload["Entities"]
+    elif "PartyCharacters" in payload:
+        entities = payload["PartyCharacters"]
+    else:
+        return data, False
+    if not isinstance(entities, list):
+        return data, False
+
+    matching: list[dict[str, Any]] = []
+    for entity in entities:
+        if not isinstance(entity, dict):
+            return data, False
+        if guid:
+            if entity.get("Guid") == guid:
+                matching.append(entity)
+            continue
+        comps = entity.get("Components")
+        if not isinstance(comps, dict):
+            continue
+        cc = comps.get("CharacterComponent")
+        if isinstance(cc, dict) and cc.get("DisplayName") == current_name:
+            matching.append(entity)
+    if len(matching) != 1:
+        return data, False
+
+    comps = matching[0].get("Components")
+    if not isinstance(comps, dict):
+        return data, False
+    cc = comps.get("CharacterComponent")
+    if not isinstance(cc, dict):
+        return data, False
+    cc["DisplayName"] = new_name
+
+    new_body = _dump_json_matching_newlines(payload, sample_text)
+    if joiner is not None:
+        new_plain = f"//**{summary_text}**//{joiner}{new_body}"
+    else:
+        new_plain = new_body
+    return encrypt_ftk2_text(new_plain), True
+
+
 def ensure_character_herb_tool_minimum(
     data: bytes,
     character_guid: str,

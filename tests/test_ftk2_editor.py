@@ -18,6 +18,7 @@ from ftk2_editor import (
     ensure_party_herb_tool_minimum,
     encrypt_ftk2_text,
     parse_ftk2,
+    rename_party_member,
     replace_character_thing,
     verify_save,
     xor_crypt,
@@ -669,6 +670,128 @@ def test_verify_save_roundtrip(sample_user_obj, tmp_path):
     parsed = parse_ftk2(data)
     assert isinstance(parsed["json"], dict)
     assert "LocalStats" in parsed["json"]
+
+
+def _run_blob_with_names(entities: list[dict]) -> bytes:
+    summary = {"runID": "run-rename", "saveName": "Rename Test", "difficulty": "normal"}
+    run = {"Entities": entities}
+    text = f"//**{json.dumps(summary)}**//\n{json.dumps(run, indent=2)}\n"
+    return encrypt_ftk2_text(text)
+
+
+@pytest.fixture
+def rename_run_blob() -> bytes:
+    return _run_blob_with_names(
+        [
+            {
+                "Guid": "hero-1",
+                "Components": {
+                    "CharacterComponent": {
+                        "DisplayName": "Hero",
+                        "ConfigName": "HUNTER",
+                        "Things": [{"ConfigName": "HERB_HEALING", "Type": "ITEM", "_stackCount": 2}],
+                    }
+                },
+            },
+            {
+                "Guid": "hero-2",
+                "Components": {
+                    "CharacterComponent": {
+                        "DisplayName": "Sidekick",
+                        "ConfigName": "BLACKSMITH",
+                        "Things": [],
+                    }
+                },
+            },
+        ]
+    )
+
+
+def test_rename_party_member_by_guid(rename_run_blob):
+    modified, ok = rename_party_member(rename_run_blob, "Sir Hero", guid="hero-1")
+    assert ok is True
+    parsed = parse_ftk2(modified)
+    assert parsed["summary"]["runID"] == "run-rename"
+    entity = parsed["json"]["Entities"][0]
+    assert entity["Components"]["CharacterComponent"]["DisplayName"] == "Sir Hero"
+    assert entity["Components"]["CharacterComponent"]["ConfigName"] == "HUNTER"
+    assert entity["Components"]["CharacterComponent"]["Things"][0]["_stackCount"] == 2
+
+
+def test_rename_party_member_by_current_name(rename_run_blob):
+    modified, ok = rename_party_member(rename_run_blob, "Archer", current_name="Hero")
+    assert ok is True
+    parsed = parse_ftk2(modified)["json"]
+    names = [
+        e["Components"]["CharacterComponent"]["DisplayName"]
+        for e in parsed["Entities"]
+    ]
+    assert names == ["Archer", "Sidekick"]
+
+
+def test_rename_party_member_unknown_guid_fails(rename_run_blob):
+    modified, ok = rename_party_member(rename_run_blob, "Nobody", guid="missing")
+    assert ok is False
+    assert modified is rename_run_blob  # unchanged
+
+
+def test_rename_party_member_blank_name_fails(rename_run_blob):
+    modified, ok = rename_party_member(rename_run_blob, "   ", guid="hero-1")
+    assert ok is False
+    assert modified is rename_run_blob
+
+
+def test_rename_party_member_ambiguous_current_name_fails():
+    blob = _run_blob_with_names(
+        [
+            {
+                "Guid": "hero-1",
+                "Components": {"CharacterComponent": {"DisplayName": "Hero", "ConfigName": "HUNTER", "Things": []}},
+            },
+            {
+                "Guid": "hero-2",
+                "Components": {"CharacterComponent": {"DisplayName": "Hero", "ConfigName": "WARRIOR", "Things": []}},
+            },
+        ]
+    )
+    modified, ok = rename_party_member(blob, "Winner", current_name="Hero")
+    assert ok is False  # ambiguous -> fail closed
+    assert modified is blob
+
+
+def test_rename_party_member_noncharacter_guid_fails():
+    blob = _run_blob_with_names([{"Guid": "npc-1", "Components": {"NpcComponent": {}}}])
+    modified, ok = rename_party_member(blob, "NoName", guid="npc-1")
+    assert ok is False
+    assert modified is blob
+
+
+def test_rename_party_member_user_save():
+    user = {
+        "PartyCharacters": [
+            {
+                "Guid": "c-1",
+                "Components": {
+                    "CharacterComponent": {"DisplayName": "Old", "ConfigName": "HUNTER", "Things": []}
+                },
+            }
+        ],
+        "LocalStats": {"LANG_ID": 1},
+    }
+    blob = encrypt_ftk2_text(json.dumps(user, indent=2) + "\n")
+    modified, ok = rename_party_member(blob, "New", current_name="Old")
+    assert ok is True
+    parsed = parse_ftk2(modified)["json"]
+    cc = parsed["PartyCharacters"][0]["Components"]["CharacterComponent"]
+    assert cc["DisplayName"] == "New"
+    assert parsed["LocalStats"]["LANG_ID"] == 1
+
+
+def test_rename_party_member_no_entities_fails(sample_user_obj):
+    blob = encrypt_ftk2_text(json.dumps(sample_user_obj, indent=2) + "\n")
+    modified, ok = rename_party_member(blob, "Anyone", guid="nope")
+    assert ok is False
+    assert modified is blob
 
 
 if __name__ == "__main__":

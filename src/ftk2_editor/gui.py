@@ -46,6 +46,7 @@ from ftk2_editor import (
     decrypt_ftk2_bytes,
     ensure_character_herb_tool_minimum,
     ensure_party_herb_tool_minimum,
+    rename_party_member,
     replace_character_thing,
     set_character_gold,
 )
@@ -238,8 +239,24 @@ class MainWindow(QMainWindow):
         )
         self.topup_party_btn.clicked.connect(self.apply_party_herb_tool_topup)
         edit_row.addWidget(self.topup_party_btn)
+
+        edit_row.addSpacing(24)
+        edit_row.addWidget(QLabel("Name"))
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("New display name")
+        self.name_edit.setMaxLength(64)
+        self.name_edit.setEnabled(False)
+        edit_row.addWidget(self.name_edit)
+        self.rename_btn = QPushButton("Rename & save")
+        self.rename_btn.setEnabled(False)
+        self.rename_btn.setToolTip(
+            "Rename the selected party member (CharacterComponent.DisplayName)"
+        )
+        self.rename_btn.clicked.connect(self.apply_selected_rename)
+        edit_row.addWidget(self.rename_btn)
+
         edit_row.addStretch(1)
-        self.gold_hint = QLabel("Open a GameRuns/*.ftk2 save, select a character, set gold or top-up consumables.")
+        self.gold_hint = QLabel("Open a GameRuns/*.ftk2 save, select a character, set gold, rename, or top-up consumables.")
         self.gold_hint.setStyleSheet("color: #9aa3ad;")
         edit_row.addWidget(self.gold_hint)
         party_layout.addLayout(edit_row)
@@ -800,6 +817,8 @@ class MainWindow(QMainWindow):
         self.apply_all_gold_btn.setEnabled(enabled)
         for btn in self._gold_preset_buttons:
             btn.setEnabled(enabled)
+        self.name_edit.setEnabled(enabled)
+        self.rename_btn.setEnabled(enabled)
         self.topup_party_btn.setEnabled(
             self._view is not None and self._view.get("kind") == "run"
         )
@@ -843,8 +862,10 @@ class MainWindow(QMainWindow):
             self.gold_spin.setValue(0)
         if can_edit:
             self.gold_hint.setText(f"Editing {row.get('name')} wallet (CURRENCY_ADVENTURE)")
+            self.name_edit.setText(str(row.get("name") or ""))
         else:
             self.gold_hint.setText("Gold editing requires a GameRuns/*.ftk2 file.")
+            self.name_edit.clear()
 
     def _on_party_double_click(self, row_idx: int, _col_idx: int) -> None:
         row = self._row_for_table(self.party_table, row_idx)
@@ -895,6 +916,52 @@ class MainWindow(QMainWindow):
             self._path.write_bytes(modified)
             self.statusBar().showMessage(
                 f"Saved {row.get('name')} gold={gold:,} (backup {bak.name})"
+            )
+            self.load_path(self._path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, APP_TITLE, f"Save failed:\n{exc}")
+
+    def apply_selected_rename(self) -> None:
+        if not self._path or not self._view or self._view.get("kind") != "run":
+            QMessageBox.warning(
+                self,
+                APP_TITLE,
+                "Open a GameRuns/*.ftk2 expedition save to rename a party member.\n"
+                "User.ftk2 does not store run party identity.",
+            )
+            return
+        row = self._selected_party_row()
+        if row is None:
+            QMessageBox.information(self, APP_TITLE, "Select a party member first.")
+            return
+        guid = row.get("guid")
+        if not guid:
+            QMessageBox.warning(self, APP_TITLE, "Selected character has no Guid.")
+            return
+        new_name = self.name_edit.text().strip()
+        if not new_name:
+            QMessageBox.warning(self, APP_TITLE, "Enter a new name first.")
+            return
+        old_name = str(row.get("name") or "?")
+        reply = QMessageBox.question(
+            self,
+            APP_TITLE,
+            f"Rename {old_name!r} to {new_name!r}?\n\n"
+            f"File: {self._path}\n"
+            "A .bak backup will be created. Quit the game first if it is running.",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            bak = backup(self._path)
+            data = self._path.read_bytes()
+            modified, ok = rename_party_member(data, new_name, guid=str(guid))
+            if not ok:
+                QMessageBox.critical(self, APP_TITLE, "Could not find that character in the run.")
+                return
+            self._path.write_bytes(modified)
+            self.statusBar().showMessage(
+                f"Renamed {old_name!r} -> {new_name!r} (backup {bak.name})"
             )
             self.load_path(self._path)
         except Exception as exc:  # noqa: BLE001

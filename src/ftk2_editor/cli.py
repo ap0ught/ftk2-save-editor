@@ -15,6 +15,7 @@ from ftk2_editor import (
     encrypt_ftk2_text,
     find_save_file,
     parse_ftk2,
+    rename_party_member,
     verify_save,
 )
 
@@ -48,6 +49,14 @@ def main() -> None:
         action="append",
         dest="updates",
         help="Set a top-level JSON field or LocalStats.NAME (e.g. --set LocalStats.LANG_ID=1)",
+    )
+    parser.add_argument(
+        "--rename",
+        metavar="ID=NEWNAME",
+        action="append",
+        dest="renames",
+        help="Rename a party character: --rename <GUID-or-current-name>=<New Name> "
+        "(uses GameRuns Entities or User PartyCharacters)",
     )
     parser.add_argument(
         "--no-backup",
@@ -117,11 +126,11 @@ def main() -> None:
         print(f"Decrypted {save_path} -> {out} ({len(plain)} chars)")
         sys.exit(0)
 
-    if args.info or args.dump or not args.updates:
+    if args.info or args.dump or not (args.updates or args.renames):
         print(f"Save file: {save_path}")
         print(f"Size: {verification['file_size']} bytes")
         print(dump_summary(parse_ftk2(data)))
-        if not args.updates:
+        if not (args.updates or args.renames):
             sys.exit(0)
 
     if not args.no_backup:
@@ -138,6 +147,22 @@ def main() -> None:
             print(f"  Set {field_name} = {value}")
         else:
             print(f"  Warning: Could not set field '{field_name}'", file=sys.stderr)
+            sys.exit(1)
+
+    for rename in args.renames or []:
+        if "=" not in rename:
+            print(f"Error: Invalid --rename '{rename}'. Use ID=NEWNAME.", file=sys.stderr)
+            sys.exit(1)
+        identifier, new_name = rename.split("=", 1)
+        modified, success = rename_party_member(modified, new_name, guid=identifier)
+        if not success:
+            modified, success = rename_party_member(
+                modified, new_name, current_name=identifier
+            )
+        if success:
+            print(f"  Renamed {identifier} -> {new_name}")
+        else:
+            print(f"  Warning: Could not rename '{identifier}'", file=sys.stderr)
             sys.exit(1)
 
     output_path = Path(args.output) if args.output else save_path
