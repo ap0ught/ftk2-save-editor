@@ -46,7 +46,7 @@ from ftk2_editor import (
     decrypt_ftk2_bytes,
     ensure_character_herb_tool_minimum,
     ensure_party_herb_tool_minimum,
-    rename_party_member,
+    rename_party_member_synced,
     replace_character_thing,
     set_character_gold,
 )
@@ -955,17 +955,40 @@ class MainWindow(QMainWindow):
         try:
             bak = backup(self._path)
             data = self._path.read_bytes()
-            modified, ok = rename_party_member(data, new_name, guid=str(guid))
+            user_path = self._locate_user_save()
+            user_data = user_path.read_bytes() if user_path else None
+            modified, ok, user_modified = rename_party_member_synced(
+                data, new_name, guid=str(guid), user_data=user_data
+            )
             if not ok:
                 QMessageBox.critical(self, APP_TITLE, "Could not find that character in the run.")
                 return
             self._path.write_bytes(modified)
-            self.statusBar().showMessage(
-                f"Renamed {old_name!r} -> {new_name!r} (backup {bak.name})"
-            )
+            msg = f"Renamed {old_name!r} -> {new_name!r} (backup {bak.name})"
+            if user_modified is not None and user_path is not None:
+                user_bak = backup(user_path)
+                user_path.write_bytes(user_modified)
+                msg += f" + {user_path.name} roster (backup {user_bak.name})"
+            self.statusBar().showMessage(msg)
             self.load_path(self._path)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, APP_TITLE, f"Save failed:\n{exc}")
+
+    def _locate_user_save(self) -> Path | None:
+        """Find the User.ftk2 save next to the run file, if it exists."""
+        if self._path:
+            candidate = self._path.parent.parent / "User.ftk2"
+            if candidate.exists():
+                return candidate
+        try:
+            from ftk2_editor import find_save_file
+
+            candidate = find_save_file()
+            if candidate.exists():
+                return candidate
+        except Exception:  # noqa: BLE001
+            pass
+        return None
 
     def apply_gold_to_all_party(self) -> None:
         if not self._path or not self._view or self._view.get("kind") != "run":

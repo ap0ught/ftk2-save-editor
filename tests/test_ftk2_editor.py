@@ -13,12 +13,14 @@ from ftk2_editor import (
     carry_over_consumables,
     decrypt_ftk2_bytes,
     dump_summary,
+    dump_user_json,
     edit_field,
     ensure_character_herb_tool_minimum,
     ensure_party_herb_tool_minimum,
     encrypt_ftk2_text,
     parse_ftk2,
     rename_party_member,
+    rename_party_member_synced,
     replace_character_thing,
     verify_save,
     xor_crypt,
@@ -792,6 +794,94 @@ def test_rename_party_member_no_entities_fails(sample_user_obj):
     modified, ok = rename_party_member(blob, "Anyone", guid="nope")
     assert ok is False
     assert modified is blob
+
+
+@pytest.fixture
+def user_roster_blob() -> bytes:
+    user = {
+        "PartyCharacters": [
+            {
+                "Guid": "hero-1",
+                "Components": {
+                    "CharacterComponent": {"DisplayName": "Hero", "ConfigName": "HUNTER", "Things": []}
+                },
+            },
+            {
+                "Guid": "hero-2",
+                "Components": {
+                    "CharacterComponent": {"DisplayName": "Sidekick", "ConfigName": "BLACKSMITH", "Things": []}
+                },
+            },
+        ],
+        "LastRunCharacters": [
+            {
+                "Guid": "hero-1",
+                "Components": {
+                    "CharacterComponent": {"DisplayName": "Hero", "ConfigName": "HUNTER", "Things": []}
+                },
+            },
+        ],
+        "LocalStats": {"LANG_ID": 1},
+    }
+    return encrypt_ftk2_text(dump_user_json(user))
+
+
+def test_rename_party_member_synced_updates_user_roster(
+    rename_run_blob, user_roster_blob
+):
+    modified, ok, user_modified = rename_party_member_synced(
+        rename_run_blob, "Sir Hero", guid="hero-1", user_data=user_roster_blob
+    )
+    assert ok is True
+    assert user_modified is not None
+    parsed = parse_ftk2(modified)["json"]
+    assert parsed["Entities"][0]["Components"]["CharacterComponent"]["DisplayName"] == "Sir Hero"
+
+    user = parse_ftk2(user_modified)["json"]
+    pc = user["PartyCharacters"]
+    assert pc[0]["Components"]["CharacterComponent"]["DisplayName"] == "Sir Hero"
+    assert pc[1]["Components"]["CharacterComponent"]["DisplayName"] == "Sidekick"  # untouched
+    assert user["LastRunCharacters"][0]["Components"]["CharacterComponent"]["DisplayName"] == "Sir Hero"
+    assert user["LocalStats"]["LANG_ID"] == 1
+
+
+def test_rename_party_member_synced_by_current_name(rename_run_blob, user_roster_blob):
+    modified, ok, user_modified = rename_party_member_synced(
+        rename_run_blob, "Archer", current_name="Hero", user_data=user_roster_blob
+    )
+    assert ok is True
+    assert user_modified is not None
+    user = parse_ftk2(user_modified)["json"]
+    assert user["PartyCharacters"][0]["Components"]["CharacterComponent"]["DisplayName"] == "Archer"
+    assert user["LastRunCharacters"][0]["Components"]["CharacterComponent"]["DisplayName"] == "Archer"
+
+
+def test_rename_party_member_synced_no_user_data(rename_run_blob):
+    modified, ok, user_modified = rename_party_member_synced(
+        rename_run_blob, "Sir Hero", guid="hero-1", user_data=None
+    )
+    assert ok is True
+    assert user_modified is None
+
+
+def test_rename_party_member_synced_roster_guids_dont_match(rename_run_blob, user_roster_blob):
+    # User roster only holds hero-1/hero-2, not "other"; nothing synced but run rename succeeds.
+    modified, ok, user_modified = rename_party_member_synced(
+        rename_run_blob, "Sir Hero", guid="other", user_data=user_roster_blob
+    )
+    assert ok is False  # run rename itself failed -> untouched
+    assert modified is rename_run_blob
+
+
+def test_rename_party_member_synced_bad_user_data(rename_run_blob):
+    bad_user = encrypt_ftk2_text("not json at all")
+    modified, ok, user_modified = rename_party_member_synced(
+        rename_run_blob, "Sir Hero", guid="hero-1", user_data=bad_user
+    )
+    assert ok is True
+    assert user_modified is None  # run rename still succeeded, roster skipped
+    parsed = parse_ftk2(modified)["json"]
+    assert parsed["Entities"][0]["Components"]["CharacterComponent"]["DisplayName"] == "Sir Hero"
 
 
 if __name__ == "__main__":

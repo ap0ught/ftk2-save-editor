@@ -15,7 +15,7 @@ from ftk2_editor import (
     encrypt_ftk2_text,
     find_save_file,
     parse_ftk2,
-    rename_party_member,
+    rename_party_member_synced,
     verify_save,
 )
 
@@ -149,18 +149,36 @@ def main() -> None:
             print(f"  Warning: Could not set field '{field_name}'", file=sys.stderr)
             sys.exit(1)
 
+    is_run = decrypt_ftk2_bytes(modified).lstrip().startswith("//**")
+    user_path: Path | None = None
+    if is_run:
+        try:
+            candidate = find_save_file()
+            if candidate.exists() and candidate != save_path:
+                user_path = candidate
+        except FileNotFoundError:
+            user_path = None
+
     for rename in args.renames or []:
         if "=" not in rename:
             print(f"Error: Invalid --rename '{rename}'. Use ID=NEWNAME.", file=sys.stderr)
             sys.exit(1)
         identifier, new_name = rename.split("=", 1)
-        modified, success = rename_party_member(modified, new_name, guid=identifier)
+        user_data = user_path.read_bytes() if user_path else None
+        modified, success, user_modified = rename_party_member_synced(
+            modified, new_name, guid=identifier, user_data=user_data
+        )
         if not success:
-            modified, success = rename_party_member(
-                modified, new_name, current_name=identifier
+            modified, success, user_modified = rename_party_member_synced(
+                modified, new_name, current_name=identifier, user_data=user_data
             )
         if success:
             print(f"  Renamed {identifier} -> {new_name}")
+            if success and user_modified is not None and user_path is not None:
+                if not args.no_backup:
+                    print(f"  Synced {user_path.name} roster backup: {backup(user_path)}")
+                user_path.write_bytes(user_modified)
+                print(f"  Synced {user_path.name} PartyCharacters/LastRunCharacters")
         else:
             print(f"  Warning: Could not rename '{identifier}'", file=sys.stderr)
             sys.exit(1)

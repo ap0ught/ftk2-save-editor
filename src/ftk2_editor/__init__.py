@@ -562,6 +562,99 @@ def rename_party_member(
     return encrypt_ftk2_text(new_plain), True
 
 
+def _resolve_character_guid(
+    data: bytes,
+    *,
+    guid: str | None,
+    current_name: str | None,
+) -> str | None:
+    """Resolve the unique guid of a party character (by guid or exact DisplayName)."""
+    if guid:
+        return guid
+    if not current_name:
+        return None
+    plain = decrypt_ftk2_bytes(data)
+    parts = _split_gamerun_plain(plain)
+    try:
+        payload = json.loads(parts[1] if parts is not None else plain)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    entities = payload.get("Entities")
+    if not isinstance(entities, list):
+        entities = payload.get("PartyCharacters")
+    if not isinstance(entities, list):
+        return None
+    matches = [
+        e.get("Guid")
+        for e in entities
+        if isinstance(e, dict)
+        and isinstance(e.get("Components"), dict)
+        and isinstance(e["Components"].get("CharacterComponent"), dict)
+        and e["Components"]["CharacterComponent"].get("DisplayName") == current_name
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _sync_roster_names(obj: dict[str, Any], new_name: str, guid: str) -> bool:
+    """Update ``DisplayName`` for *guid* in a UserData dict's roster lists."""
+    changed = False
+    for key in ("PartyCharacters", "LastRunCharacters"):
+        entries = obj.get(key)
+        if not isinstance(entries, list):
+            continue
+        for entity in entries:
+            if not isinstance(entity, dict) or entity.get("Guid") != guid:
+                continue
+            comps = entity.get("Components")
+            if not isinstance(comps, dict):
+                continue
+            cc = comps.get("CharacterComponent")
+            if not isinstance(cc, dict):
+                continue
+            cc["DisplayName"] = new_name
+            changed = True
+    return changed
+
+
+def rename_party_member_synced(
+    data: bytes,
+    new_name: str,
+    *,
+    guid: str | None = None,
+    current_name: str | None = None,
+    user_data: bytes | None = None,
+) -> tuple[bytes, bool, bytes | None]:
+    """Rename a party member and sync the name into a User save roster.
+
+    Wraps :func:`rename_party_member`; when *user_data* (User.ftk2 bytes) is
+    given, the resolved GUID's ``DisplayName`` is also updated in both
+    ``PartyCharacters`` and ``LastRunCharacters`` so menus pick up the change.
+    Returns ``(data', ok, user_data')`` where ``user_data'`` is None when there
+    was nothing to sync, otherwise the patched User bytes.
+    """
+    if not isinstance(new_name, str) or not new_name.strip():
+        return data, False, user_data
+    resolved = _resolve_character_guid(data, guid=guid, current_name=current_name)
+    modified, ok = rename_party_member(data, new_name, guid=guid, current_name=current_name)
+    if not ok:
+        return modified, False, user_data
+    if user_data is None or not resolved:
+        return modified, True, None
+    try:
+        user_plain = decrypt_ftk2_bytes(user_data)
+        user = json.loads(user_plain)
+    except json.JSONDecodeError:
+        return modified, True, None
+    if not isinstance(user, dict):
+        return modified, True, None
+    if _sync_roster_names(user, new_name, resolved):
+        patched = encrypt_ftk2_text(_dump_json_matching_newlines(user, user_plain))
+        return modified, True, patched
+    return modified, True, None
+
+
 def ensure_character_herb_tool_minimum(
     data: bytes,
     character_guid: str,
