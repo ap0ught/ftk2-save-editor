@@ -479,6 +479,39 @@ def set_character_gold(
     return encrypt_ftk2_text(new_plain), True
 
 
+def set_carnival_tickets(
+    data: bytes,
+    amount: int,
+    *,
+    ticket: str = "MISC_CARNIVALTICKET_01",
+) -> tuple[bytes, bool]:
+    """Set the campaign's shared Carnival Ticket pool (``ItemPools``) and re-encrypt.
+
+    GameRun files only (``//**summary**//`` + ``GameRunData``).  Returns
+    ``(data, False)`` when the save is not a GameRun or has no ``ItemPools``
+    dict.  The Dark Carnival dungeon branches gate on this pool
+    (``DungeonState.ChoiceStack[*].KeyItem`` / ``KeyAmount``).
+    """
+    if not isinstance(amount, (int, float)) or amount < 0:
+        raise ValueError("amount must be >= 0")
+    plain = decrypt_ftk2_bytes(data)
+    parts = _split_gamerun_plain(plain)
+    if parts is None:
+        return data, False
+    summary_text, body_text, joiner = parts
+    try:
+        run = json.loads(body_text)
+    except json.JSONDecodeError:
+        return data, False
+    pools = run.get("ItemPools")
+    if not isinstance(pools, dict):
+        return data, False
+    pools[ticket] = int(amount)
+    new_body = _dump_json_matching_newlines(run, body_text)
+    new_plain = f"//**{summary_text}**//{joiner}{new_body}"
+    return encrypt_ftk2_text(new_plain), True
+
+
 def rename_party_member(
     data: bytes,
     new_name: str,

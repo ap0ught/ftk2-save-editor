@@ -22,6 +22,7 @@ from ftk2_editor import (
     rename_party_member,
     rename_party_member_synced,
     replace_character_thing,
+    set_carnival_tickets,
     verify_save,
     xor_crypt,
 )
@@ -882,6 +883,65 @@ def test_rename_party_member_synced_bad_user_data(rename_run_blob):
     assert user_modified is None  # run rename still succeeded, roster skipped
     parsed = parse_ftk2(modified)["json"]
     assert parsed["Entities"][0]["Components"]["CharacterComponent"]["DisplayName"] == "Sir Hero"
+
+
+def _run_blob_with_tickets() -> bytes:
+    summary = {"runID": "run-tix", "saveName": "Carnival", "difficulty": "normal"}
+    run = {
+        "Entities": [],
+        "DungeonState": {
+            "ChoiceStack": [
+                None,
+                {
+                    "ID": "DARK_CARNIVAL_NECROMANCER",
+                    "KeyItem": "MISC_CARNIVALTICKET_01",
+                    "KeyAmount": 6,
+                    "DisplayName": "DUNGEON_BRANCH_NECROMANCER",
+                },
+            ]
+        },
+        "ItemPools": {"CURRENCY_LORE": 0, "MISC_CARNIVALTICKET_01": 4},
+    }
+    text = f"//**{json.dumps(summary)}**//\n{json.dumps(run, indent=2)}\n"
+    return encrypt_ftk2_text(text)
+
+
+def test_set_carnival_tickets_sets_50():
+    modified, ok = set_carnival_tickets(_run_blob_with_tickets(), 50)
+    assert ok is True
+    obj = parse_ftk2(modified)["json"]
+    assert obj["ItemPools"]["MISC_CARNIVALTICKET_01"] == 50
+    assert obj["ItemPools"]["CURRENCY_LORE"] == 0  # untouched
+    assert obj["DungeonState"]["ChoiceStack"][1]["KeyAmount"] == 6  # untouched
+
+
+def test_set_carnival_tickets_negative_raises():
+    with pytest.raises(ValueError):
+        set_carnival_tickets(_run_blob_with_tickets(), -1)
+
+
+def test_set_carnival_tickets_adds_missing_key():
+    summary = {"runID": "r", "saveName": "s", "difficulty": "normal"}
+    run = {"Entities": [], "ItemPools": {"CURRENCY_LORE": 5}}
+    blob = encrypt_ftk2_text(f"//**{json.dumps(summary)}**//\n{json.dumps(run)}\n")
+    modified, ok = set_carnival_tickets(blob, 50)
+    assert ok is True
+    obj = parse_ftk2(modified)["json"]
+    assert obj["ItemPools"]["MISC_CARNIVALTICKET_01"] == 50
+    assert obj["ItemPools"]["CURRENCY_LORE"] == 5
+
+
+def test_set_carnival_tickets_no_itempools_fails(sample_run_bytes):
+    modified, ok = set_carnival_tickets(sample_run_bytes, 50)
+    assert ok is False
+    assert modified is sample_run_bytes
+
+
+def test_set_carnival_tickets_not_gamerun_fails(sample_user_obj):
+    blob = encrypt_ftk2_text(json.dumps(sample_user_obj, indent=2) + "\n")
+    modified, ok = set_carnival_tickets(blob, 50)
+    assert ok is False
+    assert modified is blob
 
 
 if __name__ == "__main__":

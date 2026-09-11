@@ -16,6 +16,7 @@ from ftk2_editor import (
     find_save_file,
     parse_ftk2,
     rename_party_member_synced,
+    set_carnival_tickets,
     verify_save,
 )
 
@@ -57,6 +58,13 @@ def main() -> None:
         dest="renames",
         help="Rename a party character: --rename <GUID-or-current-name>=<New Name> "
         "(uses GameRuns Entities or User PartyCharacters)",
+    )
+    parser.add_argument(
+        "--tickets",
+        metavar="AMOUNT",
+        type=int,
+        default=None,
+        help="Set the campaign Carnival Ticket pool (ItemPools.MISC_CARNIVALTICKET_01)",
     )
     parser.add_argument(
         "--no-backup",
@@ -126,11 +134,11 @@ def main() -> None:
         print(f"Decrypted {save_path} -> {out} ({len(plain)} chars)")
         sys.exit(0)
 
-    if args.info or args.dump or not (args.updates or args.renames):
+    if args.info or args.dump or not (args.updates or args.renames or args.tickets is not None):
         print(f"Save file: {save_path}")
         print(f"Size: {verification['file_size']} bytes")
         print(dump_summary(parse_ftk2(data)))
-        if not (args.updates or args.renames):
+        if not (args.updates or args.renames or args.tickets is not None):
             sys.exit(0)
 
     if not args.no_backup:
@@ -147,6 +155,14 @@ def main() -> None:
             print(f"  Set {field_name} = {value}")
         else:
             print(f"  Warning: Could not set field '{field_name}'", file=sys.stderr)
+            sys.exit(1)
+
+    if args.tickets is not None:
+        modified, success = set_carnival_tickets(modified, args.tickets)
+        if success:
+            print(f"  Set Carnival Tickets = {args.tickets}")
+        else:
+            print("  Warning: Could not set Carnival Tickets (not a GameRun or no ItemPools)", file=sys.stderr)
             sys.exit(1)
 
     is_run = decrypt_ftk2_bytes(modified).lstrip().startswith("//**")

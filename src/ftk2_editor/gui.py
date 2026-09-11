@@ -48,6 +48,7 @@ from ftk2_editor import (
     ensure_party_herb_tool_minimum,
     rename_party_member_synced,
     replace_character_thing,
+    set_carnival_tickets,
     set_character_gold,
 )
 from ftk2_editor.viewmodel import (
@@ -300,6 +301,14 @@ class MainWindow(QMainWindow):
         )
         self.carry_over_btn.clicked.connect(self.apply_carry_over_consumables)
         inv_action_row.addWidget(self.carry_over_btn)
+        self.tickets_btn = QPushButton("Set Carnival tickets to 50")
+        self.tickets_btn.setEnabled(False)
+        self.tickets_btn.setToolTip(
+            "Set the campaign Carnival Ticket pool (ItemPools.MISC_CARNIVALTICKET_01) "
+            "so the Dark Carnival dungeon branches can be entered"
+        )
+        self.tickets_btn.clicked.connect(self.apply_carnival_tickets)
+        inv_action_row.addWidget(self.tickets_btn)
         inv_action_row.addStretch(1)
         inv_layout.addLayout(inv_action_row)
         self.inventory_table = QTableWidget(0, 3)
@@ -825,8 +834,9 @@ class MainWindow(QMainWindow):
 
     def _set_inventory_controls_enabled(self, enabled: bool) -> None:
         self.topup_herb_tool_btn.setEnabled(enabled)
-        can_carry_over = self._view is not None and self._view.get("kind") == "run"
-        self.carry_over_btn.setEnabled(can_carry_over)
+        can_run = self._view is not None and self._view.get("kind") == "run"
+        self.carry_over_btn.setEnabled(can_run)
+        self.tickets_btn.setEnabled(can_run)
 
     def _selected_party_row(self) -> dict[str, Any] | None:
         rows = self.party_table.selectionModel().selectedRows()
@@ -1227,6 +1237,42 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"Carried over {updated} consumable entries from {source.name} (backup {bak.name})"
             )
+            self.load_path(self._path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, APP_TITLE, f"Save failed:\n{exc}")
+
+    def apply_carnival_tickets(self) -> None:
+        if not self._path or not self._view or self._view.get("kind") != "run":
+            QMessageBox.warning(
+                self,
+                APP_TITLE,
+                "Open a GameRuns/*.ftk2 expedition save to set Carnival tickets.",
+            )
+            return
+        reply = QMessageBox.question(
+            self,
+            APP_TITLE,
+            "Set the campaign Carnival Ticket pool\n"
+            "(ItemPools.MISC_CARNIVALTICKET_01) to 50?\n\n"
+            f"File: {self._path}\n"
+            "A .bak backup will be created.\n"
+            "Quit the game first if it is running.",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            bak = backup(self._path)
+            data = self._path.read_bytes()
+            modified, ok = set_carnival_tickets(data, 50)
+            if not ok:
+                QMessageBox.critical(
+                    self,
+                    APP_TITLE,
+                    "Could not set Carnival tickets (not a GameRun or has no ItemPools).",
+                )
+                return
+            self._path.write_bytes(modified)
+            self.statusBar().showMessage(f"Set Carnival tickets = 50 (backup {bak.name})")
             self.load_path(self._path)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, APP_TITLE, f"Save failed:\n{exc}")
