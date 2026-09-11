@@ -319,7 +319,13 @@ class MainWindow(QMainWindow):
         )
         self.carry_over_btn.clicked.connect(self.apply_carry_over_consumables)
         inv_action_row.addWidget(self.carry_over_btn)
-        self.tickets_btn = QPushButton("Set Carnival tickets to 50")
+        inv_action_row.addWidget(QLabel("Carnival tickets"))
+        self.tickets_spin = QSpinBox()
+        self.tickets_spin.setRange(0, 999_999)
+        self.tickets_spin.setValue(50)
+        self.tickets_spin.setEnabled(False)
+        inv_action_row.addWidget(self.tickets_spin)
+        self.tickets_btn = QPushButton("Set tickets")
         self.tickets_btn.setEnabled(False)
         self.tickets_btn.setToolTip(
             "Set the campaign Carnival Ticket pool (ItemPools.MISC_CARNIVALTICKET_01) "
@@ -859,6 +865,7 @@ class MainWindow(QMainWindow):
         can_run = self._view is not None and self._view.get("kind") == "run"
         self.carry_over_btn.setEnabled(can_run)
         self.tickets_btn.setEnabled(can_run)
+        self.tickets_spin.setEnabled(can_run)
 
     def _selected_party_row(self) -> dict[str, Any] | None:
         rows = self.party_table.selectionModel().selectedRows()
@@ -1333,11 +1340,12 @@ class MainWindow(QMainWindow):
                 "Open a GameRuns/*.ftk2 expedition save to set Carnival tickets.",
             )
             return
+        amount = self.tickets_spin.value()
         reply = QMessageBox.question(
             self,
             APP_TITLE,
             "Set the campaign Carnival Ticket pool\n"
-            "(ItemPools.MISC_CARNIVALTICKET_01) to 50?\n\n"
+            f"(ItemPools.MISC_CARNIVALTICKET_01) to {amount}?\n\n"
             f"File: {self._path}\n"
             "A .bak backup will be created.\n"
             "Quit the game first if it is running.",
@@ -1347,7 +1355,7 @@ class MainWindow(QMainWindow):
         try:
             bak = backup(self._path)
             data = self._path.read_bytes()
-            modified, ok = set_carnival_tickets(data, 50)
+            modified, ok = set_carnival_tickets(data, amount)
             if not ok:
                 QMessageBox.critical(
                     self,
@@ -1356,7 +1364,7 @@ class MainWindow(QMainWindow):
                 )
                 return
             self._path.write_bytes(modified)
-            self.statusBar().showMessage(f"Set Carnival tickets = 50 (backup {bak.name})")
+            self.statusBar().showMessage(f"Set Carnival tickets = {amount} (backup {bak.name})")
             self.load_path(self._path)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, APP_TITLE, f"Save failed:\n{exc}")
