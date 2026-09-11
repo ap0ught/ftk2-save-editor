@@ -13,12 +13,18 @@ from ftk2_editor import (
     carry_over_consumables,
     decrypt_ftk2_bytes,
     dump_summary,
+    dump_user_json,
     edit_field,
     ensure_character_herb_tool_minimum,
     ensure_party_herb_tool_minimum,
+    ensure_party_food_minimum,
     encrypt_ftk2_text,
     parse_ftk2,
+    rename_party_member,
+    rename_party_member_synced,
     replace_character_thing,
+    give_carnival_wheel_piece,
+    set_carnival_tickets,
     verify_save,
     xor_crypt,
 )
@@ -669,6 +675,412 @@ def test_verify_save_roundtrip(sample_user_obj, tmp_path):
     parsed = parse_ftk2(data)
     assert isinstance(parsed["json"], dict)
     assert "LocalStats" in parsed["json"]
+
+
+def _run_blob_with_names(entities: list[dict]) -> bytes:
+    summary = {"runID": "run-rename", "saveName": "Rename Test", "difficulty": "normal"}
+    run = {"Entities": entities}
+    text = f"//**{json.dumps(summary)}**//\n{json.dumps(run, indent=2)}\n"
+    return encrypt_ftk2_text(text)
+
+
+@pytest.fixture
+def rename_run_blob() -> bytes:
+    return _run_blob_with_names(
+        [
+            {
+                "Guid": "hero-1",
+                "Components": {
+                    "CharacterComponent": {
+                        "DisplayName": "Hero",
+                        "ConfigName": "HUNTER",
+                        "Things": [{"ConfigName": "HERB_HEALING", "Type": "ITEM", "_stackCount": 2}],
+                    }
+                },
+            },
+            {
+                "Guid": "hero-2",
+                "Components": {
+                    "CharacterComponent": {
+                        "DisplayName": "Sidekick",
+                        "ConfigName": "BLACKSMITH",
+                        "Things": [],
+                    }
+                },
+            },
+        ]
+    )
+
+
+def test_rename_party_member_by_guid(rename_run_blob):
+    modified, ok = rename_party_member(rename_run_blob, "Sir Hero", guid="hero-1")
+    assert ok is True
+    parsed = parse_ftk2(modified)
+    assert parsed["summary"]["runID"] == "run-rename"
+    entity = parsed["json"]["Entities"][0]
+    assert entity["Components"]["CharacterComponent"]["DisplayName"] == "Sir Hero"
+    assert entity["Components"]["CharacterComponent"]["ConfigName"] == "HUNTER"
+    assert entity["Components"]["CharacterComponent"]["Things"][0]["_stackCount"] == 2
+
+
+def test_rename_party_member_by_current_name(rename_run_blob):
+    modified, ok = rename_party_member(rename_run_blob, "Archer", current_name="Hero")
+    assert ok is True
+    parsed = parse_ftk2(modified)["json"]
+    names = [
+        e["Components"]["CharacterComponent"]["DisplayName"]
+        for e in parsed["Entities"]
+    ]
+    assert names == ["Archer", "Sidekick"]
+
+
+def test_rename_party_member_unknown_guid_fails(rename_run_blob):
+    modified, ok = rename_party_member(rename_run_blob, "Nobody", guid="missing")
+    assert ok is False
+    assert modified is rename_run_blob  # unchanged
+
+
+def test_rename_party_member_blank_name_fails(rename_run_blob):
+    modified, ok = rename_party_member(rename_run_blob, "   ", guid="hero-1")
+    assert ok is False
+    assert modified is rename_run_blob
+
+
+def test_rename_party_member_ambiguous_current_name_fails():
+    blob = _run_blob_with_names(
+        [
+            {
+                "Guid": "hero-1",
+                "Components": {"CharacterComponent": {"DisplayName": "Hero", "ConfigName": "HUNTER", "Things": []}},
+            },
+            {
+                "Guid": "hero-2",
+                "Components": {"CharacterComponent": {"DisplayName": "Hero", "ConfigName": "WARRIOR", "Things": []}},
+            },
+        ]
+    )
+    modified, ok = rename_party_member(blob, "Winner", current_name="Hero")
+    assert ok is False  # ambiguous -> fail closed
+    assert modified is blob
+
+
+def test_rename_party_member_noncharacter_guid_fails():
+    blob = _run_blob_with_names([{"Guid": "npc-1", "Components": {"NpcComponent": {}}}])
+    modified, ok = rename_party_member(blob, "NoName", guid="npc-1")
+    assert ok is False
+    assert modified is blob
+
+
+def test_rename_party_member_user_save():
+    user = {
+        "PartyCharacters": [
+            {
+                "Guid": "c-1",
+                "Components": {
+                    "CharacterComponent": {"DisplayName": "Old", "ConfigName": "HUNTER", "Things": []}
+                },
+            }
+        ],
+        "LocalStats": {"LANG_ID": 1},
+    }
+    blob = encrypt_ftk2_text(json.dumps(user, indent=2) + "\n")
+    modified, ok = rename_party_member(blob, "New", current_name="Old")
+    assert ok is True
+    parsed = parse_ftk2(modified)["json"]
+    cc = parsed["PartyCharacters"][0]["Components"]["CharacterComponent"]
+    assert cc["DisplayName"] == "New"
+    assert parsed["LocalStats"]["LANG_ID"] == 1
+
+
+def test_rename_party_member_no_entities_fails(sample_user_obj):
+    blob = encrypt_ftk2_text(json.dumps(sample_user_obj, indent=2) + "\n")
+    modified, ok = rename_party_member(blob, "Anyone", guid="nope")
+    assert ok is False
+    assert modified is blob
+
+
+@pytest.fixture
+def user_roster_blob() -> bytes:
+    user = {
+        "PartyCharacters": [
+            {
+                "Guid": "hero-1",
+                "Components": {
+                    "CharacterComponent": {"DisplayName": "Hero", "ConfigName": "HUNTER", "Things": []}
+                },
+            },
+            {
+                "Guid": "hero-2",
+                "Components": {
+                    "CharacterComponent": {"DisplayName": "Sidekick", "ConfigName": "BLACKSMITH", "Things": []}
+                },
+            },
+        ],
+        "LastRunCharacters": [
+            {
+                "Guid": "hero-1",
+                "Components": {
+                    "CharacterComponent": {"DisplayName": "Hero", "ConfigName": "HUNTER", "Things": []}
+                },
+            },
+        ],
+        "LocalStats": {"LANG_ID": 1},
+    }
+    return encrypt_ftk2_text(dump_user_json(user))
+
+
+def test_rename_party_member_synced_updates_user_roster(
+    rename_run_blob, user_roster_blob
+):
+    modified, ok, user_modified = rename_party_member_synced(
+        rename_run_blob, "Sir Hero", guid="hero-1", user_data=user_roster_blob
+    )
+    assert ok is True
+    assert user_modified is not None
+    parsed = parse_ftk2(modified)["json"]
+    assert parsed["Entities"][0]["Components"]["CharacterComponent"]["DisplayName"] == "Sir Hero"
+
+    user = parse_ftk2(user_modified)["json"]
+    pc = user["PartyCharacters"]
+    assert pc[0]["Components"]["CharacterComponent"]["DisplayName"] == "Sir Hero"
+    assert pc[1]["Components"]["CharacterComponent"]["DisplayName"] == "Sidekick"  # untouched
+    assert user["LastRunCharacters"][0]["Components"]["CharacterComponent"]["DisplayName"] == "Sir Hero"
+    assert user["LocalStats"]["LANG_ID"] == 1
+
+
+def test_rename_party_member_synced_by_current_name(rename_run_blob, user_roster_blob):
+    modified, ok, user_modified = rename_party_member_synced(
+        rename_run_blob, "Archer", current_name="Hero", user_data=user_roster_blob
+    )
+    assert ok is True
+    assert user_modified is not None
+    user = parse_ftk2(user_modified)["json"]
+    assert user["PartyCharacters"][0]["Components"]["CharacterComponent"]["DisplayName"] == "Archer"
+    assert user["LastRunCharacters"][0]["Components"]["CharacterComponent"]["DisplayName"] == "Archer"
+
+
+def test_rename_party_member_synced_no_user_data(rename_run_blob):
+    modified, ok, user_modified = rename_party_member_synced(
+        rename_run_blob, "Sir Hero", guid="hero-1", user_data=None
+    )
+    assert ok is True
+    assert user_modified is None
+
+
+def test_rename_party_member_synced_roster_guids_dont_match(rename_run_blob, user_roster_blob):
+    # User roster only holds hero-1/hero-2, not "other"; nothing synced but run rename succeeds.
+    modified, ok, user_modified = rename_party_member_synced(
+        rename_run_blob, "Sir Hero", guid="other", user_data=user_roster_blob
+    )
+    assert ok is False  # run rename itself failed -> untouched
+    assert modified is rename_run_blob
+
+
+def test_rename_party_member_synced_bad_user_data(rename_run_blob):
+    bad_user = encrypt_ftk2_text("not json at all")
+    modified, ok, user_modified = rename_party_member_synced(
+        rename_run_blob, "Sir Hero", guid="hero-1", user_data=bad_user
+    )
+    assert ok is True
+    assert user_modified is None  # run rename still succeeded, roster skipped
+    parsed = parse_ftk2(modified)["json"]
+    assert parsed["Entities"][0]["Components"]["CharacterComponent"]["DisplayName"] == "Sir Hero"
+
+
+def _run_blob_with_tickets() -> bytes:
+    summary = {"runID": "run-tix", "saveName": "Carnival", "difficulty": "normal"}
+    run = {
+        "Entities": [],
+        "DungeonState": {
+            "ChoiceStack": [
+                None,
+                {
+                    "ID": "DARK_CARNIVAL_NECROMANCER",
+                    "KeyItem": "MISC_CARNIVALTICKET_01",
+                    "KeyAmount": 6,
+                    "DisplayName": "DUNGEON_BRANCH_NECROMANCER",
+                },
+            ]
+        },
+        "ItemPools": {"CURRENCY_LORE": 0, "MISC_CARNIVALTICKET_01": 4},
+    }
+    text = f"//**{json.dumps(summary)}**//\n{json.dumps(run, indent=2)}\n"
+    return encrypt_ftk2_text(text)
+
+
+def test_set_carnival_tickets_sets_50():
+    modified, ok = set_carnival_tickets(_run_blob_with_tickets(), 50)
+    assert ok is True
+    obj = parse_ftk2(modified)["json"]
+    assert obj["ItemPools"]["MISC_CARNIVALTICKET_01"] == 50
+    assert obj["ItemPools"]["CURRENCY_LORE"] == 0  # untouched
+    assert obj["DungeonState"]["ChoiceStack"][1]["KeyAmount"] == 6  # untouched
+
+
+def test_set_carnival_tickets_negative_raises():
+    with pytest.raises(ValueError):
+        set_carnival_tickets(_run_blob_with_tickets(), -1)
+
+
+def test_set_carnival_tickets_rejects_float_and_bool():
+    with pytest.raises(ValueError):
+        set_carnival_tickets(_run_blob_with_tickets(), 6.9)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        set_carnival_tickets(_run_blob_with_tickets(), True)
+
+
+def test_set_carnival_tickets_non_mapping_body_fails():
+    summary = {"runID": "r", "saveName": "s", "difficulty": "normal"}
+    blob = encrypt_ftk2_text(f"//**{json.dumps(summary)}**//\n[]\n")
+    modified, ok = set_carnival_tickets(blob, 50)
+    assert ok is False
+    assert modified is blob
+
+
+def test_set_carnival_tickets_adds_missing_key():
+    summary = {"runID": "r", "saveName": "s", "difficulty": "normal"}
+    run = {"Entities": [], "ItemPools": {"CURRENCY_LORE": 5}}
+    blob = encrypt_ftk2_text(f"//**{json.dumps(summary)}**//\n{json.dumps(run)}\n")
+    modified, ok = set_carnival_tickets(blob, 50)
+    assert ok is True
+    obj = parse_ftk2(modified)["json"]
+    assert obj["ItemPools"]["MISC_CARNIVALTICKET_01"] == 50
+    assert obj["ItemPools"]["CURRENCY_LORE"] == 5
+
+
+def test_set_carnival_tickets_no_itempools_fails(sample_run_bytes):
+    modified, ok = set_carnival_tickets(sample_run_bytes, 50)
+    assert ok is False
+    assert modified is sample_run_bytes
+
+
+def test_set_carnival_tickets_not_gamerun_fails(sample_user_obj):
+    blob = encrypt_ftk2_text(json.dumps(sample_user_obj, indent=2) + "\n")
+    modified, ok = set_carnival_tickets(blob, 50)
+    assert ok is False
+    assert modified is blob
+
+
+def test_give_carnival_wheel_piece_adds_to_character(sample_run_bytes):
+    modified, ok = give_carnival_wheel_piece(sample_run_bytes, "hero-1")
+    assert ok is True
+    run = parse_ftk2(modified)["json"]
+    things = run["Entities"][0]["Components"]["CharacterComponent"]["Things"]
+    piece = [t for t in things if t.get("ConfigName") == "MISC_WHEELPIECE_01"]
+    assert len(piece) == 1
+    assert piece[0]["Type"] == "ITEM"
+    assert piece[0]["_stackCount"] == 1
+    assert piece[0]["CustomData"] == {"ID": "PLAYERS_FULL_HEAL"}
+    assert piece[0]["Expansion"] == "BASE"
+    assert sum(1 for t in things if t.get("ConfigName") == "HERB_HEALING") == 1
+
+
+def test_give_carnival_wheel_piece_keeps_other_characters(sample_run_bytes):
+    run = parse_ftk2(sample_run_bytes)["json"]
+    run["Entities"] = [
+        {"Guid": "hero-1", "Components": {"CharacterComponent": {"DisplayName": "A", "ConfigName": "HUNTER", "Things": []}}},
+        {"Guid": "hero-2", "Components": {"CharacterComponent": {"DisplayName": "B", "ConfigName": "MONK", "Things": []}}},
+    ]
+    summary = {"runID": "r", "saveName": "s", "difficulty": "normal"}
+    blob = encrypt_ftk2_text(f"//**{json.dumps(summary)}**//\n{json.dumps(run)}\n")
+    modified, ok = give_carnival_wheel_piece(blob, "hero-2")
+    assert ok is True
+    run2 = parse_ftk2(modified)["json"]
+    a = run2["Entities"][0]["Components"]["CharacterComponent"]["Things"]
+    b = run2["Entities"][1]["Components"]["CharacterComponent"]["Things"]
+    assert a == []
+    assert [t["ConfigName"] for t in b] == ["MISC_WHEELPIECE_01"]
+
+
+def test_give_carnival_wheel_piece_already_has_fails(sample_run_bytes):
+    modified, ok = give_carnival_wheel_piece(sample_run_bytes, "hero-1")
+    assert ok is True
+    again, ok2 = give_carnival_wheel_piece(modified, "hero-1")
+    assert ok2 is False
+    assert again is modified
+
+
+def test_give_carnival_wheel_piece_bad_character_fails(sample_run_bytes):
+    modified, ok = give_carnival_wheel_piece(sample_run_bytes, "nope")
+    assert ok is False
+    assert modified is sample_run_bytes
+
+
+def test_give_carnival_wheel_piece_not_gamerun_fails(sample_user_obj):
+    blob = encrypt_ftk2_text(json.dumps(sample_user_obj, indent=2) + "\n")
+    modified, ok = give_carnival_wheel_piece(blob, "hero-1")
+    assert ok is False
+    assert modified is blob
+
+
+def _snack_run_blob() -> bytes:
+    summary = {"runID": "snack", "saveName": "S", "difficulty": "normal"}
+    run = {
+        "Entities": [
+            {"Guid": "hero-1", "Components": {"CharacterComponent": {"DisplayName": "A", "ConfigName": "HUNTER", "Things": [
+                {"ConfigName": "SNICKERDOODLE_BASIC_01", "Type": "ITEM", "_stackCount": 3},
+                {"ConfigName": "HOTDOG_BASIC_01", "Type": "ITEM", "_stackCount": 1},
+            ]}}},
+            {"Guid": "hero-2", "Components": {"CharacterComponent": {"DisplayName": "B", "ConfigName": "MONK", "Things": [
+                {"ConfigName": "SNICKERDOODLE_BASIC_01", "Type": "ITEM", "_stackCount": 7},
+                {"ConfigName": "HERB_HEALING", "Type": "ITEM", "_stackCount": 4},
+            ]}}},
+        ]
+    }
+    return encrypt_ftk2_text(f"//**{json.dumps(summary)}**//\n{json.dumps(run)}\n")
+
+
+def test_ensure_party_food_minimum_tops_up_snacks():
+    modified, ok, updated = ensure_party_food_minimum(
+        _snack_run_blob(), ["hero-1", "hero-2"], minimum=10
+    )
+    assert ok is True
+    assert updated == 3  # two snacks + one snack
+    run = parse_ftk2(modified)["json"]
+    a = {t["ConfigName"]: t["_stackCount"] for t in run["Entities"][0]["Components"]["CharacterComponent"]["Things"]}
+    b = {t["ConfigName"]: t["_stackCount"] for t in run["Entities"][1]["Components"]["CharacterComponent"]["Things"]}
+    assert a["SNICKERDOODLE_BASIC_01"] == 10
+    assert a["HOTDOG_BASIC_01"] == 10
+    assert b["SNICKERDOODLE_BASIC_01"] == 10
+    assert b["HERB_HEALING"] == 4  # not a snack, untouched
+
+
+def test_ensure_party_food_minimum_leaves_already_high():
+    blob = _snack_run_blob()
+    modified, ok, updated = ensure_party_food_minimum(
+        blob, ["hero-1", "hero-2"], minimum=10
+    )
+    again, ok2, updated2 = ensure_party_food_minimum(
+        modified, ["hero-1", "hero-2"], minimum=10
+    )
+    assert ok2 is True
+    assert updated2 == 0
+    assert again is modified
+
+
+def test_ensure_party_food_minimum_empty_guids():
+    blob = _snack_run_blob()
+    modified, ok, updated = ensure_party_food_minimum(blob, [], minimum=10)
+    assert ok is False
+    assert updated == 0
+    assert modified is blob
+
+
+def test_ensure_party_food_minimum_not_gamerun_fails(sample_user_obj):
+    blob = encrypt_ftk2_text(json.dumps(sample_user_obj, indent=2) + "\n")
+    modified, ok, updated = ensure_party_food_minimum(blob, ["hero-1"], minimum=10)
+    assert ok is False
+    assert updated == 0
+    assert modified is blob
+
+
+def test_ensure_party_food_minimum_non_mapping_body_fails():
+    summary = {"runID": "r", "saveName": "s", "difficulty": "normal"}
+    blob = encrypt_ftk2_text(f"//**{json.dumps(summary)}**//\n[]\n")
+    modified, ok, updated = ensure_party_food_minimum(blob, ["hero-1"], minimum=10)
+    assert ok is False
+    assert updated == 0
+    assert modified is blob
 
 
 if __name__ == "__main__":
