@@ -46,8 +46,11 @@ from ftk2_editor import (
     decrypt_ftk2_bytes,
     ensure_character_herb_tool_minimum,
     ensure_party_herb_tool_minimum,
+    ensure_party_food_minimum,
     rename_party_member_synced,
     replace_character_thing,
+    give_carnival_wheel_piece,
+    set_carnival_tickets,
     set_character_gold,
 )
 from ftk2_editor.viewmodel import (
@@ -239,6 +242,14 @@ class MainWindow(QMainWindow):
         )
         self.topup_party_btn.clicked.connect(self.apply_party_herb_tool_topup)
         edit_row.addWidget(self.topup_party_btn)
+        self.topup_snacks_btn = QPushButton("Top up party snacks to 10")
+        self.topup_snacks_btn.setEnabled(False)
+        self.topup_snacks_btn.setToolTip(
+            "Set every snickerdoodle (SNICKERDOODLE_BASIC_01) and hotdog (HOTDOG_BASIC_01) "
+            "stack below 10 to 10 for all party members"
+        )
+        self.topup_snacks_btn.clicked.connect(self.apply_party_food_topup)
+        edit_row.addWidget(self.topup_snacks_btn)
 
         edit_row.addSpacing(24)
         edit_row.addWidget(QLabel("Name"))
@@ -254,6 +265,14 @@ class MainWindow(QMainWindow):
         )
         self.rename_btn.clicked.connect(self.apply_selected_rename)
         edit_row.addWidget(self.rename_btn)
+        self.wheel_piece_btn = QPushButton("Give Carnival Wheel piece")
+        self.wheel_piece_btn.setEnabled(False)
+        self.wheel_piece_btn.setToolTip(
+            "Add one Carnival Wheel piece (MISC_WHEELPIECE_01, full-heal reward) "
+            "to the selected character's inventory"
+        )
+        self.wheel_piece_btn.clicked.connect(self.apply_give_wheel_piece)
+        edit_row.addWidget(self.wheel_piece_btn)
 
         edit_row.addStretch(1)
         self.gold_hint = QLabel("Open a GameRuns/*.ftk2 save, select a character, set gold, rename, or top-up consumables.")
@@ -300,6 +319,14 @@ class MainWindow(QMainWindow):
         )
         self.carry_over_btn.clicked.connect(self.apply_carry_over_consumables)
         inv_action_row.addWidget(self.carry_over_btn)
+        self.tickets_btn = QPushButton("Set Carnival tickets to 50")
+        self.tickets_btn.setEnabled(False)
+        self.tickets_btn.setToolTip(
+            "Set the campaign Carnival Ticket pool (ItemPools.MISC_CARNIVALTICKET_01) "
+            "so the Dark Carnival dungeon branches can be entered"
+        )
+        self.tickets_btn.clicked.connect(self.apply_carnival_tickets)
+        inv_action_row.addWidget(self.tickets_btn)
         inv_action_row.addStretch(1)
         inv_layout.addLayout(inv_action_row)
         self.inventory_table = QTableWidget(0, 3)
@@ -819,14 +846,19 @@ class MainWindow(QMainWindow):
             btn.setEnabled(enabled)
         self.name_edit.setEnabled(enabled)
         self.rename_btn.setEnabled(enabled)
+        self.wheel_piece_btn.setEnabled(enabled)
         self.topup_party_btn.setEnabled(
+            self._view is not None and self._view.get("kind") == "run"
+        )
+        self.topup_snacks_btn.setEnabled(
             self._view is not None and self._view.get("kind") == "run"
         )
 
     def _set_inventory_controls_enabled(self, enabled: bool) -> None:
         self.topup_herb_tool_btn.setEnabled(enabled)
-        can_carry_over = self._view is not None and self._view.get("kind") == "run"
-        self.carry_over_btn.setEnabled(can_carry_over)
+        can_run = self._view is not None and self._view.get("kind") == "run"
+        self.carry_over_btn.setEnabled(can_run)
+        self.tickets_btn.setEnabled(can_run)
 
     def _selected_party_row(self) -> dict[str, Any] | None:
         rows = self.party_table.selectionModel().selectedRows()
@@ -1180,6 +1212,61 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, APP_TITLE, f"Save failed:\n{exc}")
 
+    def apply_party_food_topup(self) -> None:
+        if not self._path or not self._view or self._view.get("kind") != "run":
+            QMessageBox.warning(
+                self,
+                APP_TITLE,
+                "Open a GameRuns/*.ftk2 expedition save to top up party snacks.",
+            )
+            return
+        targets = [
+            row for row in self._party_rows
+            if row.get("guid") and row.get("has_player_component")
+        ]
+        if not targets:
+            QMessageBox.information(self, APP_TITLE, "No player-controlled party members with Guids found.")
+            return
+        names = ", ".join(str(row.get("name")) for row in targets)
+        reply = QMessageBox.question(
+            self,
+            APP_TITLE,
+            "Set every snickerdoodle (SNICKERDOODLE_BASIC_01) and hotdog (HOTDOG_BASIC_01) "
+            "stack below 10 to 10 for all party members?\n\n"
+            f"{names}\n\n"
+            f"File: {self._path}\n"
+            "A .bak backup will be created if changes are needed."
+            " Quit the game first if it is running.",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            guids = [str(row["guid"]) for row in targets]
+            data = self._path.read_bytes()
+            modified, ok, updated = ensure_party_food_minimum(data, guids, minimum=10)
+            if not ok:
+                QMessageBox.critical(self, APP_TITLE, "Could not find any party members in the run.")
+                return
+            if updated == 0:
+                QMessageBox.information(
+                    self,
+                    APP_TITLE,
+                    "The party's snacks are already topped up.\n\n"
+                    "Every existing snickerdoodle and hotdog stack is at least 10.\n\n"
+                    "No changes were made and no backup was created.",
+                )
+                return
+            bak = backup(self._path)
+            self._path.write_bytes(modified)
+            self.statusBar().showMessage(
+                f"Updated {updated} snack stacks (snickerdoodle/hotdog to 10) across {len(targets)} characters (backup {bak.name})"
+            )
+            self._pending_select_guid = str(targets[0]["guid"])
+            self._pending_focus_inventory = True
+            self.load_path(self._path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, APP_TITLE, f"Save failed:\n{exc}")
+
     def apply_carry_over_consumables(self) -> None:
         if not self._path or not self._view or self._view.get("kind") != "run":
             QMessageBox.warning(
@@ -1233,6 +1320,88 @@ class MainWindow(QMainWindow):
             self._path.write_bytes(modified)
             self.statusBar().showMessage(
                 f"Carried over {updated} consumable entries from {source.name} (backup {bak.name})"
+            )
+            self.load_path(self._path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, APP_TITLE, f"Save failed:\n{exc}")
+
+    def apply_carnival_tickets(self) -> None:
+        if not self._path or not self._view or self._view.get("kind") != "run":
+            QMessageBox.warning(
+                self,
+                APP_TITLE,
+                "Open a GameRuns/*.ftk2 expedition save to set Carnival tickets.",
+            )
+            return
+        reply = QMessageBox.question(
+            self,
+            APP_TITLE,
+            "Set the campaign Carnival Ticket pool\n"
+            "(ItemPools.MISC_CARNIVALTICKET_01) to 50?\n\n"
+            f"File: {self._path}\n"
+            "A .bak backup will be created.\n"
+            "Quit the game first if it is running.",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            bak = backup(self._path)
+            data = self._path.read_bytes()
+            modified, ok = set_carnival_tickets(data, 50)
+            if not ok:
+                QMessageBox.critical(
+                    self,
+                    APP_TITLE,
+                    "Could not set Carnival tickets (not a GameRun or has no ItemPools).",
+                )
+                return
+            self._path.write_bytes(modified)
+            self.statusBar().showMessage(f"Set Carnival tickets = 50 (backup {bak.name})")
+            self.load_path(self._path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, APP_TITLE, f"Save failed:\n{exc}")
+
+    def apply_give_wheel_piece(self) -> None:
+        if not self._path or not self._view or self._view.get("kind") != "run":
+            QMessageBox.warning(
+                self,
+                APP_TITLE,
+                "Open a GameRuns/*.ftk2 expedition save to give a wheel piece.",
+            )
+            return
+        row = self._selected_party_row()
+        if row is None:
+            QMessageBox.information(self, APP_TITLE, "Select a party member first.")
+            return
+        guid = row.get("guid")
+        name = str(row.get("name") or "?")
+        if not guid:
+            QMessageBox.warning(self, APP_TITLE, "Selected character has no Guid.")
+            return
+        reply = QMessageBox.question(
+            self,
+            APP_TITLE,
+            f"Give a Carnival Wheel piece (MISC_WHEELPIECE_01, full-heal)\nto {name}?\n\n"
+            f"File: {self._path}\n"
+            "A .bak backup will be created. Quit the game first if it is running.",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            bak = backup(self._path)
+            data = self._path.read_bytes()
+            modified, ok = give_carnival_wheel_piece(data, str(guid))
+            if not ok:
+                QMessageBox.warning(
+                    self,
+                    APP_TITLE,
+                    f"Could not give a wheel piece to {name} "
+                    "(not a GameRun, no such character, or they already hold one).",
+                )
+                return
+            self._path.write_bytes(modified)
+            self.statusBar().showMessage(
+                f"Gave Carnival Wheel piece to {name} (backup {bak.name})"
             )
             self.load_path(self._path)
         except Exception as exc:  # noqa: BLE001

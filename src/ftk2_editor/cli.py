@@ -13,11 +13,22 @@ from ftk2_editor import (
     dump_summary,
     edit_field,
     encrypt_ftk2_text,
+    ensure_party_food_minimum,
     find_save_file,
+    give_carnival_wheel_piece,
     parse_ftk2,
     rename_party_member_synced,
+    set_carnival_tickets,
     verify_save,
 )
+from ftk2_editor.viewmodel import party_from_run
+
+
+def _nonneg_int(value: str) -> int:
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return number
 
 
 def main() -> None:
@@ -57,6 +68,25 @@ def main() -> None:
         dest="renames",
         help="Rename a party character: --rename <GUID-or-current-name>=<New Name> "
         "(uses GameRuns Entities or User PartyCharacters)",
+    )
+    parser.add_argument(
+        "--tickets",
+        metavar="AMOUNT",
+        type=_nonneg_int,
+        default=None,
+        help="Set the campaign Carnival Ticket pool (ItemPools.MISC_CARNIVALTICKET_01)",
+    )
+    parser.add_argument(
+        "--wheel-piece",
+        metavar="GUID",
+        default=None,
+        help="Give one Carnival Wheel piece (MISC_WHEELPIECE_01, full-heal) "
+        "to the character with this GUID",
+    )
+    parser.add_argument(
+        "--snacks-to-10",
+        action="store_true",
+        help="Top up every party member's snickerdoodle/hotdog stacks to 10",
     )
     parser.add_argument(
         "--no-backup",
@@ -126,11 +156,17 @@ def main() -> None:
         print(f"Decrypted {save_path} -> {out} ({len(plain)} chars)")
         sys.exit(0)
 
-    if args.info or args.dump or not (args.updates or args.renames):
+    if args.info or args.dump or not (
+        args.updates
+        or args.renames
+        or args.tickets is not None
+        or args.wheel_piece is not None
+        or args.snacks_to_10
+    ):
         print(f"Save file: {save_path}")
         print(f"Size: {verification['file_size']} bytes")
         print(dump_summary(parse_ftk2(data)))
-        if not (args.updates or args.renames):
+        if not (args.updates or args.renames or args.tickets is not None):
             sys.exit(0)
 
     if not args.no_backup:
@@ -148,6 +184,38 @@ def main() -> None:
         else:
             print(f"  Warning: Could not set field '{field_name}'", file=sys.stderr)
             sys.exit(1)
+
+    if args.tickets is not None:
+        modified, success = set_carnival_tickets(modified, args.tickets)
+        if success:
+            print(f"  Set Carnival Tickets = {args.tickets}")
+        else:
+            print("  Warning: Could not set Carnival Tickets (not a GameRun or no ItemPools)", file=sys.stderr)
+            sys.exit(1)
+
+    if args.wheel_piece is not None:
+        modified, success = give_carnival_wheel_piece(modified, args.wheel_piece)
+        if success:
+            print(f"  Gave Carnival Wheel piece to {args.wheel_piece}")
+        else:
+            print(
+                "  Warning: Could not give a wheel piece (not a GameRun, no such character, "
+                "or they already hold one)",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    if args.snacks_to_10:
+        rows = party_from_run(parse_ftk2(modified)["json"])
+        guids = [str(r["guid"]) for r in rows if r.get("has_player_component") and r.get("guid")]
+        if not guids:
+            print("  Warning: No player-controlled party members found for snack top-up", file=sys.stderr)
+            sys.exit(1)
+        modified, ok, updated = ensure_party_food_minimum(modified, guids, minimum=10)
+        if updated:
+            print(f"  Topped {updated} snickerdoodle/hotdog stacks to 10")
+        else:
+            print("  Party snacks already at 10 or no snack stacks found")
 
     try:
         is_run = decrypt_ftk2_bytes(modified).lstrip().startswith("//**")

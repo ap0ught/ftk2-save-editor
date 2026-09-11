@@ -415,6 +415,73 @@ def add_character_thing(
     return encrypt_ftk2_text(new_plain), True
 
 
+def give_carnival_wheel_piece(
+    data: bytes,
+    character_guid: str,
+    *,
+    reward: str = "PLAYERS_FULL_HEAL",
+) -> tuple[bytes, bool]:
+    """Give one Carnival Wheel piece (``MISC_WHEELPIECE_01``) to a run character.
+
+    Appends the exact thing shape the game uses for a Wheel-of-Death reward
+    (``CustomData.ID`` = ``reward``, stack 1). Fail-closed: returns
+    ``(data, False)`` on non-GameRun saves, invalid structure, duplicate
+    character GUIDs, or when the character already holds a wheel piece.
+    """
+    plain = decrypt_ftk2_bytes(data)
+    parts = _split_gamerun_plain(plain)
+    if parts is None:
+        return data, False
+    summary_text, body_text, joiner = parts
+    try:
+        run = json.loads(body_text)
+    except json.JSONDecodeError:
+        return data, False
+    if not isinstance(run, dict) or not character_guid or not reward:
+        return data, False
+
+    entities = run.get("Entities")
+    if not isinstance(entities, list):
+        return data, False
+    for e in entities:
+        if not isinstance(e, dict):
+            return data, False
+
+    matching_chars = [e for e in entities if e.get("Guid") == character_guid]
+    if len(matching_chars) != 1:
+        return data, False
+    entity = matching_chars[0]
+
+    comps = entity.get("Components")
+    if not isinstance(comps, dict):
+        return data, False
+    cc = comps.get("CharacterComponent")
+    if not isinstance(cc, dict):
+        return data, False
+    things = cc.get("Things")
+    if not isinstance(things, list):
+        return data, False
+    for t in things:
+        if not isinstance(t, dict):
+            return data, False
+        if t.get("ConfigName") == "MISC_WHEELPIECE_01":
+            return data, False  # already holds one
+
+    things.append(
+        {
+            "Id": str(uuid.uuid4()),
+            "ConfigName": "MISC_WHEELPIECE_01",
+            "Type": "ITEM",
+            "_stackCount": 1,
+            "CustomData": {"ID": reward},
+            "Expansion": "BASE",
+        }
+    )
+    new_body = _dump_json_matching_newlines(run, body_text)
+    new_plain = f"//**{summary_text}**//{joiner}{new_body}"
+    return encrypt_ftk2_text(new_plain), True
+
+
 def set_character_gold(
     data: bytes,
     character_guid: str,
@@ -475,6 +542,41 @@ def set_character_gold(
 
     new_body = _dump_json_matching_newlines(run, body_text)
     # Keep summary bytes unchanged when possible (avoid reformatting)
+    new_plain = f"//**{summary_text}**//{joiner}{new_body}"
+    return encrypt_ftk2_text(new_plain), True
+
+
+def set_carnival_tickets(
+    data: bytes,
+    amount: int,
+    *,
+    ticket: str = "MISC_CARNIVALTICKET_01",
+) -> tuple[bytes, bool]:
+    """Set the campaign's shared Carnival Ticket pool (``ItemPools``) and re-encrypt.
+
+    GameRun files only (``//**summary**//`` + ``GameRunData``).  Returns
+    ``(data, False)`` when the save is not a GameRun or has no ``ItemPools``
+    dict.  The Dark Carnival dungeon branches gate on this pool
+    (``DungeonState.ChoiceStack[*].KeyItem`` / ``KeyAmount``).
+    """
+    if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
+        raise ValueError("amount must be a non-negative integer")
+    plain = decrypt_ftk2_bytes(data)
+    parts = _split_gamerun_plain(plain)
+    if parts is None:
+        return data, False
+    summary_text, body_text, joiner = parts
+    try:
+        run = json.loads(body_text)
+    except json.JSONDecodeError:
+        return data, False
+    if not isinstance(run, dict):
+        return data, False
+    pools = run.get("ItemPools")
+    if not isinstance(pools, dict):
+        return data, False
+    pools[ticket] = int(amount)
+    new_body = _dump_json_matching_newlines(run, body_text)
     new_plain = f"//**{summary_text}**//{joiner}{new_body}"
     return encrypt_ftk2_text(new_plain), True
 
@@ -797,6 +899,79 @@ def ensure_party_herb_tool_minimum(
                 or thing_type in {"HERB", "TOOL"}
             )
             if not is_supported_consumable:
+                continue
+            try:
+                count = int(thing.get("_stackCount") or 0)
+            except (TypeError, ValueError):
+                count = 0
+            if count < minimum:
+                thing["_stackCount"] = int(minimum)
+                total_updated += 1
+
+    if not any_found:
+        return data, False, 0
+    if total_updated == 0:
+        return data, True, 0
+
+    new_body = _dump_json_matching_newlines(run, body_text)
+    new_plain = f"//**{summary_text}**//{joiner}{new_body}"
+    return encrypt_ftk2_text(new_plain), True, total_updated
+
+
+def ensure_party_food_minimum(
+    data: bytes,
+    guids: list[str],
+    *,
+    minimum: int = 10,
+    configs: tuple[str, ...] = ("SNICKERDOODLE_BASIC_01", "HOTDOG_BASIC_01"),
+) -> tuple[bytes, bool, int]:
+    """Top up the party's snack stacks (snickerdoodles / hotdogs) to *minimum*.
+
+    Single-pass over the run for all *guids* (like
+    ``ensure_party_herb_tool_minimum``).  Only existing stacks are raised;
+    characters with none are left alone.
+    """
+    if minimum < 0:
+        raise ValueError("minimum must be >= 0")
+    if not guids:
+        return data, False, 0
+
+    plain = decrypt_ftk2_bytes(data)
+    parts = _split_gamerun_plain(plain)
+    if parts is None:
+        return data, False, 0
+    summary_text, body_text, joiner = parts
+    try:
+        run = json.loads(body_text)
+    except json.JSONDecodeError:
+        return data, False, 0
+    if not isinstance(run, dict):
+        return data, False, 0
+
+    entities = run.get("Entities")
+    if not isinstance(entities, list):
+        return data, False, 0
+
+    config_set = {str(c).upper() for c in configs}
+    guid_set = set(guids)
+    total_updated = 0
+    any_found = False
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        guid = entity.get("Guid")
+        if guid not in guid_set:
+            continue
+        any_found = True
+        comps = entity.get("Components") or {}
+        cc = comps.get("CharacterComponent") or {}
+        things = cc.get("Things") or []
+        if not isinstance(things, list):
+            continue
+        for thing in things:
+            if not isinstance(thing, dict):
+                continue
+            if str(thing.get("ConfigName") or "").upper() not in config_set:
                 continue
             try:
                 count = int(thing.get("_stackCount") or 0)
