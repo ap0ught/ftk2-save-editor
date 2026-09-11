@@ -887,6 +887,38 @@ def test_rename_party_member_synced_bad_user_data(rename_run_blob):
     assert parsed["Entities"][0]["Components"]["CharacterComponent"]["DisplayName"] == "Sir Hero"
 
 
+def test_rename_party_member_corrupt_bytes_fails():
+    # Undecodable payload must fail-closed, not propagate a UnicodeDecodeError.
+    corrupt = b"\xff\xfe not utf8 \x80\x81"
+    modified, ok = rename_party_member(corrupt, "X", guid="hero-1")
+    assert ok is False
+    assert modified is corrupt
+
+
+def test_rename_party_member_synced_corrupt_user_fails_closed(rename_run_blob):
+    # A cryptographically valid run but garbage User bytes: run rename still
+    # succeeds, roster is skipped (None), nothing raises.
+    bad_user = b"\xff\xfe\x80\x81"
+    modified, ok, user_modified = rename_party_member_synced(
+        rename_run_blob, "Sir Hero", guid="hero-1", user_data=bad_user
+    )
+    assert ok is True
+    assert user_modified is None
+    parsed = parse_ftk2(modified)["json"]
+    assert parsed["Entities"][0]["Components"]["CharacterComponent"]["DisplayName"] == "Sir Hero"
+
+
+def test_rename_party_member_synced_failure_returns_none(rename_run_blob, user_roster_blob):
+    # Failed run rename must return (data, False, None) -- never the caller's
+    # original user bytes, which would look like a successful sync.
+    modified, ok, user_modified = rename_party_member_synced(
+        rename_run_blob, "Nobody", guid="nope", user_data=user_roster_blob
+    )
+    assert ok is False
+    assert modified is rename_run_blob
+    assert user_modified is None
+
+
 def _run_blob_with_tickets() -> bytes:
     summary = {"runID": "run-tix", "saveName": "Carnival", "difficulty": "normal"}
     run = {

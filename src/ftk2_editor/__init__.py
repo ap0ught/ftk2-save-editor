@@ -597,44 +597,69 @@ def rename_party_member(
     missing or not unique, when ``new_name`` is blank, or when the save /
     character structure is invalid.
     """
-    if not isinstance(new_name, str) or not new_name.strip():
-        return data, False
-    if not guid and not current_name:
-        return data, False
+    modified, ok, _ = _rename_party_member(
+        data, new_name, guid=guid, current_name=current_name
+    )
+    return modified, ok
 
-    plain = decrypt_ftk2_bytes(data)
+
+def _rename_party_member(
+    data: bytes,
+    new_name: str,
+    *,
+    guid: str | None,
+    current_name: str | None,
+) -> tuple[bytes, bool, str | None]:
+    """Parse-once rename that also returns the resolved character GUID.
+
+    A single decrypt + parse for both matching and mutation; callers that also
+    need the GUID (roster sync) use this instead of re-parsing the payload.
+    Fail-closed: returns ``(data, False, None)`` on invalid input, decode /
+    decryption errors, a missing or non-unique match, or a malformed save
+    structure.  ``*guid*`` resolves to itself when it is supplied and present.
+    """
+    if not isinstance(new_name, str) or not new_name.strip():
+        return data, False, None
+    if not guid and not current_name:
+        return data, False, None
+
+    try:
+        plain = decrypt_ftk2_bytes(data)
+    except UnicodeDecodeError:
+        return data, False, None
     parts = _split_gamerun_plain(plain)
     if parts is not None:
         summary_text, body_text, joiner = parts
         try:
             payload = json.loads(body_text)
         except json.JSONDecodeError:
-            return data, False
+            return data, False, None
         sample_text = body_text
     else:
         try:
             payload = json.loads(plain)
         except json.JSONDecodeError:
-            return data, False
+            return data, False, None
         summary_text = plain
         joiner = None
         sample_text = plain
 
     if not isinstance(payload, dict):
-        return data, False
+        return data, False, None
     if "Entities" in payload:
         entities = payload["Entities"]
     elif "PartyCharacters" in payload:
         entities = payload["PartyCharacters"]
     else:
-        return data, False
+        return data, False, None
     if not isinstance(entities, list):
-        return data, False
+        return data, False, None
 
+    resolved: str | None = guid
     matching: list[dict[str, Any]] = []
     for entity in entities:
         if not isinstance(entity, dict):
-            return data, False
+            return data, False, None
         if guid:
             if entity.get("Guid") == guid:
                 matching.append(entity)
@@ -646,14 +671,16 @@ def rename_party_member(
         if isinstance(cc, dict) and cc.get("DisplayName") == current_name:
             matching.append(entity)
     if len(matching) != 1:
-        return data, False
+        return data, False, None
+    if not guid:
+        resolved = matching[0].get("Guid")
 
     comps = matching[0].get("Components")
     if not isinstance(comps, dict):
-        return data, False
+        return data, False, None
     cc = comps.get("CharacterComponent")
     if not isinstance(cc, dict):
-        return data, False
+        return data, False, None
     cc["DisplayName"] = new_name
 
     new_body = _dump_json_matching_newlines(payload, sample_text)
@@ -661,42 +688,7 @@ def rename_party_member(
         new_plain = f"//**{summary_text}**//{joiner}{new_body}"
     else:
         new_plain = new_body
-    return encrypt_ftk2_text(new_plain), True
-
-
-def _resolve_character_guid(
-    data: bytes,
-    *,
-    guid: str | None,
-    current_name: str | None,
-) -> str | None:
-    """Resolve the unique guid of a party character (by guid or exact DisplayName)."""
-    if guid:
-        return guid
-    if not current_name:
-        return None
-    plain = decrypt_ftk2_bytes(data)
-    parts = _split_gamerun_plain(plain)
-    try:
-        payload = json.loads(parts[1] if parts is not None else plain)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    entities = payload.get("Entities")
-    if not isinstance(entities, list):
-        entities = payload.get("PartyCharacters")
-    if not isinstance(entities, list):
-        return None
-    matches = [
-        e.get("Guid")
-        for e in entities
-        if isinstance(e, dict)
-        and isinstance(e.get("Components"), dict)
-        and isinstance(e["Components"].get("CharacterComponent"), dict)
-        and e["Components"]["CharacterComponent"].get("DisplayName") == current_name
-    ]
-    return matches[0] if len(matches) == 1 else None
+    return encrypt_ftk2_text(new_plain), True, resolved
 
 
 def _sync_roster_names(obj: dict[str, Any], new_name: str, guid: str) -> bool:
@@ -733,19 +725,24 @@ def rename_party_member_synced(
     Wraps :func:`rename_party_member`; when *user_data* (User.ftk2 bytes) is
     given, the resolved GUID's ``DisplayName`` is also updated in both
     ``PartyCharacters`` and ``LastRunCharacters`` so menus pick up the change.
-    Returns ``(data', ok, user_data')`` where ``user_data'`` is None when there
-    was nothing to sync, otherwise the patched User bytes.
+    Returns ``(data', ok, user_data')`` where ``user_data'`` is None when the
+    rename failed or there was nothing to sync, otherwise the patched User
+    bytes.  On failure the original *data* is returned unchanged.
     """
     if not isinstance(new_name, str) or not new_name.strip():
-        return data, False, user_data
-    resolved = _resolve_character_guid(data, guid=guid, current_name=current_name)
-    modified, ok = rename_party_member(data, new_name, guid=guid, current_name=current_name)
+        return data, False, None
+    modified, ok, resolved = _rename_party_member(
+        data, new_name, guid=guid, current_name=current_name
+    )
     if not ok:
-        return modified, False, user_data
+        return data, False, None
     if user_data is None or not resolved:
         return modified, True, None
     try:
         user_plain = decrypt_ftk2_bytes(user_data)
+    except UnicodeDecodeError:
+        return modified, True, None
+    try:
         user = json.loads(user_plain)
     except json.JSONDecodeError:
         return modified, True, None

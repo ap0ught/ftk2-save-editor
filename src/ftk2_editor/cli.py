@@ -217,7 +217,11 @@ def main() -> None:
         else:
             print("  Party snacks already at 10 or no snack stacks found")
 
-    is_run = decrypt_ftk2_bytes(modified).lstrip().startswith("//**")
+    try:
+        is_run = decrypt_ftk2_bytes(modified).lstrip().startswith("//**")
+    except UnicodeDecodeError:
+        is_run = False
+
     output_path = Path(args.output) if args.output else save_path
 
     # The associated campaign roster lives two folders above the run save
