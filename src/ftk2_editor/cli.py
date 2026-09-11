@@ -149,41 +149,51 @@ def main() -> None:
             print(f"  Warning: Could not set field '{field_name}'", file=sys.stderr)
             sys.exit(1)
 
-    is_run = decrypt_ftk2_bytes(modified).lstrip().startswith("//**")
-    user_path: Path | None = None
-    if is_run:
-        try:
-            candidate = find_save_file()
-            if candidate.exists() and candidate != save_path:
-                user_path = candidate
-        except FileNotFoundError:
-            user_path = None
+    try:
+        is_run = decrypt_ftk2_bytes(modified).lstrip().startswith("//**")
+    except UnicodeDecodeError:
+        is_run = False
 
+    output_path = Path(args.output) if args.output else save_path
+
+    # The associated campaign roster lives two folders above the run save
+    # (AppData/.../For The King II/User.ftk2, sibling of GameRuns/).  Only sync
+    # it when writing back to the live run; an alternate --output must not
+    # touch another campaign's User.ftk2.
+    user_path: Path | None = None
+    if is_run and output_path == save_path:
+        candidate = save_path.parent.parent / "User.ftk2"
+        if candidate.exists() and candidate != save_path:
+            user_path = candidate
+
+    user_bytes: bytes | None = user_path.read_bytes() if user_path else None
     for rename in args.renames or []:
         if "=" not in rename:
             print(f"Error: Invalid --rename '{rename}'. Use ID=NEWNAME.", file=sys.stderr)
             sys.exit(1)
         identifier, new_name = rename.split("=", 1)
-        user_data = user_path.read_bytes() if user_path else None
         modified, success, user_modified = rename_party_member_synced(
-            modified, new_name, guid=identifier, user_data=user_data
+            modified, new_name, guid=identifier, user_data=user_bytes
         )
         if not success:
             modified, success, user_modified = rename_party_member_synced(
-                modified, new_name, current_name=identifier, user_data=user_data
+                modified, new_name, current_name=identifier, user_data=user_bytes
             )
-        if success:
-            print(f"  Renamed {identifier} -> {new_name}")
-            if success and user_modified is not None and user_path is not None:
-                if not args.no_backup:
-                    print(f"  Synced {user_path.name} roster backup: {backup(user_path)}")
-                user_path.write_bytes(user_modified)
-                print(f"  Synced {user_path.name} PartyCharacters/LastRunCharacters")
-        else:
+        if not success:
             print(f"  Warning: Could not rename '{identifier}'", file=sys.stderr)
             sys.exit(1)
+        print(f"  Renamed {identifier} -> {new_name}")
+        if user_modified is not None:
+            user_bytes = user_modified
 
-    output_path = Path(args.output) if args.output else save_path
+    # Defer the roster write until the whole rename batch has succeeded, so a
+    # later failure cannot leave User.ftk2 ahead of the (unwritten) run file.
+    if user_path is not None and user_bytes is not None:
+        if not args.no_backup:
+            print(f"  Synced {user_path.name} roster backup: {backup(user_path)}")
+        user_path.write_bytes(user_bytes)
+        print(f"  Synced {user_path.name} PartyCharacters/LastRunCharacters")
+
     if not args.no_backup and output_path == save_path:
         print("\nWARNING: Overwriting live save file. Prefer letting --no-backup be off, or use --output.", file=sys.stderr)
     output_path.write_bytes(modified)
