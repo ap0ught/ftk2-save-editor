@@ -48,6 +48,7 @@ from ftk2_editor import (
     ensure_party_herb_tool_minimum,
     rename_party_member_synced,
     replace_character_thing,
+    give_carnival_wheel_piece,
     set_carnival_tickets,
     set_character_gold,
 )
@@ -255,6 +256,14 @@ class MainWindow(QMainWindow):
         )
         self.rename_btn.clicked.connect(self.apply_selected_rename)
         edit_row.addWidget(self.rename_btn)
+        self.wheel_piece_btn = QPushButton("Give Carnival Wheel piece")
+        self.wheel_piece_btn.setEnabled(False)
+        self.wheel_piece_btn.setToolTip(
+            "Add one Carnival Wheel piece (MISC_WHEELPIECE_01, full-heal reward) "
+            "to the selected character's inventory"
+        )
+        self.wheel_piece_btn.clicked.connect(self.apply_give_wheel_piece)
+        edit_row.addWidget(self.wheel_piece_btn)
 
         edit_row.addStretch(1)
         self.gold_hint = QLabel("Open a GameRuns/*.ftk2 save, select a character, set gold, rename, or top-up consumables.")
@@ -828,6 +837,7 @@ class MainWindow(QMainWindow):
             btn.setEnabled(enabled)
         self.name_edit.setEnabled(enabled)
         self.rename_btn.setEnabled(enabled)
+        self.wheel_piece_btn.setEnabled(enabled)
         self.topup_party_btn.setEnabled(
             self._view is not None and self._view.get("kind") == "run"
         )
@@ -1273,6 +1283,52 @@ class MainWindow(QMainWindow):
                 return
             self._path.write_bytes(modified)
             self.statusBar().showMessage(f"Set Carnival tickets = 50 (backup {bak.name})")
+            self.load_path(self._path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, APP_TITLE, f"Save failed:\n{exc}")
+
+    def apply_give_wheel_piece(self) -> None:
+        if not self._path or not self._view or self._view.get("kind") != "run":
+            QMessageBox.warning(
+                self,
+                APP_TITLE,
+                "Open a GameRuns/*.ftk2 expedition save to give a wheel piece.",
+            )
+            return
+        row = self._selected_party_row()
+        if row is None:
+            QMessageBox.information(self, APP_TITLE, "Select a party member first.")
+            return
+        guid = row.get("guid")
+        name = str(row.get("name") or "?")
+        if not guid:
+            QMessageBox.warning(self, APP_TITLE, "Selected character has no Guid.")
+            return
+        reply = QMessageBox.question(
+            self,
+            APP_TITLE,
+            f"Give a Carnival Wheel piece (MISC_WHEELPIECE_01, full-heal)\nto {name}?\n\n"
+            f"File: {self._path}\n"
+            "A .bak backup will be created. Quit the game first if it is running.",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            bak = backup(self._path)
+            data = self._path.read_bytes()
+            modified, ok = give_carnival_wheel_piece(data, str(guid))
+            if not ok:
+                QMessageBox.warning(
+                    self,
+                    APP_TITLE,
+                    f"Could not give a wheel piece to {name} "
+                    "(not a GameRun, no such character, or they already hold one).",
+                )
+                return
+            self._path.write_bytes(modified)
+            self.statusBar().showMessage(
+                f"Gave Carnival Wheel piece to {name} (backup {bak.name})"
+            )
             self.load_path(self._path)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, APP_TITLE, f"Save failed:\n{exc}")

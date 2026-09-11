@@ -415,6 +415,73 @@ def add_character_thing(
     return encrypt_ftk2_text(new_plain), True
 
 
+def give_carnival_wheel_piece(
+    data: bytes,
+    character_guid: str,
+    *,
+    reward: str = "PLAYERS_FULL_HEAL",
+) -> tuple[bytes, bool]:
+    """Give one Carnival Wheel piece (``MISC_WHEELPIECE_01``) to a run character.
+
+    Appends the exact thing shape the game uses for a Wheel-of-Death reward
+    (``CustomData.ID`` = ``reward``, stack 1). Fail-closed: returns
+    ``(data, False)`` on non-GameRun saves, invalid structure, duplicate
+    character GUIDs, or when the character already holds a wheel piece.
+    """
+    plain = decrypt_ftk2_bytes(data)
+    parts = _split_gamerun_plain(plain)
+    if parts is None:
+        return data, False
+    summary_text, body_text, joiner = parts
+    try:
+        run = json.loads(body_text)
+    except json.JSONDecodeError:
+        return data, False
+    if not isinstance(run, dict) or not character_guid or not reward:
+        return data, False
+
+    entities = run.get("Entities")
+    if not isinstance(entities, list):
+        return data, False
+    for e in entities:
+        if not isinstance(e, dict):
+            return data, False
+
+    matching_chars = [e for e in entities if e.get("Guid") == character_guid]
+    if len(matching_chars) != 1:
+        return data, False
+    entity = matching_chars[0]
+
+    comps = entity.get("Components")
+    if not isinstance(comps, dict):
+        return data, False
+    cc = comps.get("CharacterComponent")
+    if not isinstance(cc, dict):
+        return data, False
+    things = cc.get("Things")
+    if not isinstance(things, list):
+        return data, False
+    for t in things:
+        if not isinstance(t, dict):
+            return data, False
+        if t.get("ConfigName") == "MISC_WHEELPIECE_01":
+            return data, False  # already holds one
+
+    things.append(
+        {
+            "Id": str(uuid.uuid4()),
+            "ConfigName": "MISC_WHEELPIECE_01",
+            "Type": "ITEM",
+            "_stackCount": 1,
+            "CustomData": {"ID": reward},
+            "Expansion": "BASE",
+        }
+    )
+    new_body = _dump_json_matching_newlines(run, body_text)
+    new_plain = f"//**{summary_text}**//{joiner}{new_body}"
+    return encrypt_ftk2_text(new_plain), True
+
+
 def set_character_gold(
     data: bytes,
     character_guid: str,

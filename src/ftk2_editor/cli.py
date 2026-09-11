@@ -15,6 +15,7 @@ from ftk2_editor import (
     encrypt_ftk2_text,
     find_save_file,
     parse_ftk2,
+    give_carnival_wheel_piece,
     rename_party_member_synced,
     set_carnival_tickets,
     verify_save,
@@ -65,6 +66,13 @@ def main() -> None:
         type=int,
         default=None,
         help="Set the campaign Carnival Ticket pool (ItemPools.MISC_CARNIVALTICKET_01)",
+    )
+    parser.add_argument(
+        "--wheel-piece",
+        metavar="GUID",
+        default=None,
+        help="Give one Carnival Wheel piece (MISC_WHEELPIECE_01, full-heal) "
+        "to the character with this GUID",
     )
     parser.add_argument(
         "--no-backup",
@@ -134,7 +142,9 @@ def main() -> None:
         print(f"Decrypted {save_path} -> {out} ({len(plain)} chars)")
         sys.exit(0)
 
-    if args.info or args.dump or not (args.updates or args.renames or args.tickets is not None):
+    if args.info or args.dump or not (
+        args.updates or args.renames or args.tickets is not None or args.wheel_piece is not None
+    ):
         print(f"Save file: {save_path}")
         print(f"Size: {verification['file_size']} bytes")
         print(dump_summary(parse_ftk2(data)))
@@ -163,6 +173,18 @@ def main() -> None:
             print(f"  Set Carnival Tickets = {args.tickets}")
         else:
             print("  Warning: Could not set Carnival Tickets (not a GameRun or no ItemPools)", file=sys.stderr)
+            sys.exit(1)
+
+    if args.wheel_piece is not None:
+        modified, success = give_carnival_wheel_piece(modified, args.wheel_piece)
+        if success:
+            print(f"  Gave Carnival Wheel piece to {args.wheel_piece}")
+        else:
+            print(
+                "  Warning: Could not give a wheel piece (not a GameRun, no such character, "
+                "or they already hold one)",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
     is_run = decrypt_ftk2_bytes(modified).lstrip().startswith("//**")

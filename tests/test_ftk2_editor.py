@@ -22,6 +22,7 @@ from ftk2_editor import (
     rename_party_member,
     rename_party_member_synced,
     replace_character_thing,
+    give_carnival_wheel_piece,
     set_carnival_tickets,
     verify_save,
     xor_crypt,
@@ -940,6 +941,58 @@ def test_set_carnival_tickets_no_itempools_fails(sample_run_bytes):
 def test_set_carnival_tickets_not_gamerun_fails(sample_user_obj):
     blob = encrypt_ftk2_text(json.dumps(sample_user_obj, indent=2) + "\n")
     modified, ok = set_carnival_tickets(blob, 50)
+    assert ok is False
+    assert modified is blob
+
+
+def test_give_carnival_wheel_piece_adds_to_character(sample_run_bytes):
+    modified, ok = give_carnival_wheel_piece(sample_run_bytes, "hero-1")
+    assert ok is True
+    run = parse_ftk2(modified)["json"]
+    things = run["Entities"][0]["Components"]["CharacterComponent"]["Things"]
+    piece = [t for t in things if t.get("ConfigName") == "MISC_WHEELPIECE_01"]
+    assert len(piece) == 1
+    assert piece[0]["Type"] == "ITEM"
+    assert piece[0]["_stackCount"] == 1
+    assert piece[0]["CustomData"] == {"ID": "PLAYERS_FULL_HEAL"}
+    assert piece[0]["Expansion"] == "BASE"
+    assert sum(1 for t in things if t.get("ConfigName") == "HERB_HEALING") == 1
+
+
+def test_give_carnival_wheel_piece_keeps_other_characters(sample_run_bytes):
+    run = parse_ftk2(sample_run_bytes)["json"]
+    run["Entities"] = [
+        {"Guid": "hero-1", "Components": {"CharacterComponent": {"DisplayName": "A", "ConfigName": "HUNTER", "Things": []}}},
+        {"Guid": "hero-2", "Components": {"CharacterComponent": {"DisplayName": "B", "ConfigName": "MONK", "Things": []}}},
+    ]
+    summary = {"runID": "r", "saveName": "s", "difficulty": "normal"}
+    blob = encrypt_ftk2_text(f"//**{json.dumps(summary)}**//\n{json.dumps(run)}\n")
+    modified, ok = give_carnival_wheel_piece(blob, "hero-2")
+    assert ok is True
+    run2 = parse_ftk2(modified)["json"]
+    a = run2["Entities"][0]["Components"]["CharacterComponent"]["Things"]
+    b = run2["Entities"][1]["Components"]["CharacterComponent"]["Things"]
+    assert a == []
+    assert [t["ConfigName"] for t in b] == ["MISC_WHEELPIECE_01"]
+
+
+def test_give_carnival_wheel_piece_already_has_fails(sample_run_bytes):
+    modified, ok = give_carnival_wheel_piece(sample_run_bytes, "hero-1")
+    assert ok is True
+    again, ok2 = give_carnival_wheel_piece(modified, "hero-1")
+    assert ok2 is False
+    assert again is modified
+
+
+def test_give_carnival_wheel_piece_bad_character_fails(sample_run_bytes):
+    modified, ok = give_carnival_wheel_piece(sample_run_bytes, "nope")
+    assert ok is False
+    assert modified is sample_run_bytes
+
+
+def test_give_carnival_wheel_piece_not_gamerun_fails(sample_user_obj):
+    blob = encrypt_ftk2_text(json.dumps(sample_user_obj, indent=2) + "\n")
+    modified, ok = give_carnival_wheel_piece(blob, "hero-1")
     assert ok is False
     assert modified is blob
 
