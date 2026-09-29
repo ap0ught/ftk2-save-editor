@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 from typing import Any
 
-from ftk2_editor import GAME_RUNS_DIR, USER_SAVE, parse_ftk2
+from ftk2_editor import FTK2_ASSETS_DIR, GAME_RUNS_DIR, USER_SAVE, parse_ftk2
 
 CURRENCY_ADVENTURE = "CURRENCY_ADVENTURE"
 CURRENCY_LORE = "CURRENCY_LORE"
@@ -317,6 +319,8 @@ def load_save_view(path: Path) -> dict[str, Any]:
     kind = "run" if summary or "Entities" in obj else "user"
     party: list[dict[str, Any]] = []
     non_party: list[dict[str, Any]] = []
+    pet_owners: set[str] = set()
+    follower_bindings: dict[str, str] = {}
     stats: dict[str, Any] = {}
     overview: dict[str, Any] = {
         "path": str(path),
@@ -370,6 +374,22 @@ def load_save_view(path: Path) -> dict[str, Any]:
                 for info in followers.values()
                 if isinstance(info, dict) and info.get("FollowerID")
             }
+            # A "pet owner" is a player whose bound follower is a COMPANION
+            # (as opposed to a MERCENARY/other follower).
+            companion_guids = {
+                str(entity.get("Guid"))
+                for entity in (obj.get("Entities") or [])
+                if isinstance(entity, dict)
+                and (entity.get("Components") or {})
+                .get("CharacterComponent", {})
+                .get("CharacterType")
+                == "COMPANION"
+            }
+            for host_guid, info in followers.items():
+                if not isinstance(info, dict):
+                    continue
+                if str(info.get("FollowerID")) in companion_guids:
+                    pet_owners.add(str(host_guid))
             if follower_guids:
                 follower_rows = party_from_entities(
                     obj.get("Entities") or [],
@@ -381,6 +401,28 @@ def load_save_view(path: Path) -> dict[str, Any]:
                     if guid and guid not in party_guids:
                         party.append(row)
                         party_guids.add(guid)
+        # Each host owns at most one follower (PlayerFollowers is a map), so
+        # annotate the rows with the binding for display and add/remove guards.
+        if isinstance(followers, dict):
+            follower_bindings = {
+                str(host_guid): str(info.get("FollowerID"))
+                for host_guid, info in followers.items()
+                if isinstance(info, dict) and info.get("FollowerID")
+            }
+        follows = {follower: host for host, follower in follower_bindings.items()}
+        names = {
+            str(row.get("guid")): row.get("name")
+            for row in party
+            if row.get("guid")
+        }
+        for row in party:
+            guid = str(row.get("guid"))
+            bound = follower_bindings.get(guid)
+            row["follower_guid"] = bound
+            row["follower_name"] = names.get(bound) if bound else None
+            host = follows.get(guid)
+            row["follows_guid"] = host
+            row["follows_name"] = names.get(host) if host else None
         non_party = [
             row
             for row in all_rows
@@ -420,10 +462,301 @@ def load_save_view(path: Path) -> dict[str, Any]:
         "overview": overview,
         "party": party,
         "non_party": non_party,
+        "pet_owners": pet_owners,
+        "followers": follower_bindings,
         "stats": stats if isinstance(stats, dict) else {},
         "stats_rows": interesting_stats(stats if isinstance(stats, dict) else {}),
         "summary": summary,
         "tree": tree_root,
         "raw": parsed,
         "unlocks": list(obj.get("NewLoreStoreUnlocks") or []) if kind == "user" else [],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Game-asset catalogs (mercenaries, playable classes) for the party editors.
+# Small static JSONs under For The King II_Data/.../Assets/Configs/JSON~ are
+# read on demand and cached so repeated GUI refreshes stay cheap.  All access
+# is guarded: a missing/invalid game install yields empty catalogs rather than
+# raising, keeping the editor usable on systems without the game mounted.
+# ---------------------------------------------------------------------------
+
+_asset_cache: dict[tuple[str, str], Any] = {}
+
+
+def _load_asset_json(name: str) -> Any:
+    """Return the parsed ``JSON~/{name}`` asset dict, or ``{}`` when unavailable."""
+    key = (str(FTK2_ASSETS_DIR), name)
+    if key in _asset_cache:
+        return _asset_cache[key]
+    try:
+        data: Any = {}
+        path = FTK2_ASSETS_DIR / name
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    _asset_cache[key] = data
+    return data
+
+
+# Non-consumable Thing classes: gear, currency and innate passives never
+# appear in a "grant me a consumable" list.
+_NON_CONSUMABLE_CLASSES = frozenset(
+    {"WEAPON", "ATTIRE", "TRAIT", "CURRENCY", "PASSIVE", "VEHICLE", "DEBUG"}
+)
+
+# Every stackable Thing config across the game's Things/ configs.
+_THINGS_FILES = ("Things/Items.json", "Things/Attires.json", "Things/Weapons.json")
+
+
+def consumable_catalog() -> list[dict[str, Any]]:
+    """Every stackable, usable Thing in the game's ``Things/`` configs.
+
+    A config qualifies when it stacks (``Stacks: true``), is not hidden, is not
+    gear/currency/a passive, and is *usable* — either tagged ``USEABLE`` or
+    carrying at least one ``Interactable.Abilities`` entry (that second test is
+    what keeps quest pieces like ``MISC_WHEELPIECE_01``, which have no USEABLE
+    tag but do have ``WHEEL_PIECE_USE``).
+
+    Each record: ``{"config", "name", "class", "rarity", "consumable_type",
+    "abilities"}``.  ``name`` is the English string from ``Langs/en.json``,
+    falling back to the config name when a tier variant has no entry of its
+    own.  Sorted by class then name, so the GUI list groups naturally.
+    """
+    names = _load_asset_json("Langs/en.json")
+    catalog: list[dict[str, Any]] = []
+    for file_name in _THINGS_FILES:
+        things = _load_asset_json(file_name)
+        for config, entry in things.items():
+            if not isinstance(config, str) or not isinstance(entry, dict):
+                continue
+            if entry.get("Hidden"):
+                continue
+            item_class = str(entry.get("Class") or "")
+            if item_class in _NON_CONSUMABLE_CLASSES or not item_class:
+                continue
+            if not entry.get("Stacks"):
+                continue
+            if config.upper().startswith("CURRENCY_") or config.upper() == "XP":
+                continue
+            tags = entry.get("Tags")
+            abilities = (entry.get("Interactable") or {}).get("Abilities")
+            abilities = abilities if isinstance(abilities, dict) else {}
+            if not abilities and not (isinstance(tags, list) and "USEABLE" in tags):
+                continue
+            label = names.get(config) if isinstance(names, dict) else None
+            catalog.append(
+                {
+                    "config": config,
+                    "name": str(label) if isinstance(label, str) and label else config,
+                    "class": item_class,
+                    "rarity": str(entry.get("Rarity") or ""),
+                    "consumable_type": str(entry.get("ConsumableType") or ""),
+                    "abilities": sorted(str(a) for a in abilities),
+                }
+            )
+    catalog.sort(key=lambda row: (row["class"], row["name"].lower(), row["config"]))
+    return catalog
+
+
+def mercenary_catalog() -> list[dict[str, Any]]:
+    """Available mercenary recruit families from ``Followers.json``.
+
+    Each record: ``{"class_name", "config_base", "contract_rounds", "rarity",
+    "tiers"}`` where ``tiers`` lists the ``_BASIC_00.._07`` levels actually
+    present in ``Characters.json`` for that family (standard mercs ship 0-7;
+    specials may only ship a subset).  Sorted by display label.
+    """
+    followers = _load_asset_json("Followers.json")
+    characters = _load_asset_json("Characters.json")
+    catalog: list[dict[str, Any]] = []
+    for class_name, entry in followers.items():
+        if not isinstance(entry, dict) or entry.get("Type") != "MERCENARY":
+            continue
+        base = str(entry.get("ConfigName") or "")
+        if not base:
+            continue
+        family = base.rsplit("_BASIC_", 1)[0] if "_BASIC_" in base else base
+        tiers = sorted(
+            int(match.group(1))
+            for key in characters
+            if isinstance(key, str)
+            and (match := re.search(rf"^{re.escape(family)}_BASIC_(\d+)$", key))
+        )
+        if not tiers:
+            tiers = [0]
+        catalog.append(
+            {
+                "class_name": class_name,
+                "config_base": base,
+                "contract_rounds": entry.get("ContractRounds"),
+                "rarity": entry.get("Rarity"),
+                "tiers": tiers,
+            }
+        )
+    catalog.sort(key=lambda row: str(row["class_name"]))
+    return catalog
+
+
+def mercenary_spec(class_name: str, tier: int = 0) -> dict[str, Any] | None:
+    """Build the ``add_mercenary`` spec for a recruit family and tier.
+
+    Returns ``None`` (fail-closed) when the family is unknown, has no
+    character config, or the tier is out of range.
+    """
+    followers = _load_asset_json("Followers.json")
+    characters = _load_asset_json("Characters.json")
+    entry = followers.get(class_name)
+    if not isinstance(entry, dict) or entry.get("Type") != "MERCENARY":
+        return None
+    base = str(entry.get("ConfigName") or "")
+    if not base:
+        return None
+    family = base.rsplit("_BASIC_", 1)[0] if "_BASIC_" in base else base
+
+    available = sorted(
+        int(match.group(1))
+        for key in characters
+        if isinstance(key, str)
+        and (match := re.search(rf"^{re.escape(family)}_BASIC_(\d+)$", key))
+    )
+    if tier not in available:
+        return None
+
+    config_name = f"{family}_BASIC_{tier:02d}"
+    config = characters.get(config_name)
+    if not isinstance(config, dict):
+        return None
+    stats = config.get("Stats") if isinstance(config.get("Stats"), dict) else {}
+    things = config.get("Things") if isinstance(config.get("Things"), dict) else {}
+    start_things = [str(key) for key, count in things.items() if count]
+    return {
+        "class_name": class_name,
+        "type_args": class_name,
+        "config_name": config_name,
+        "contract_rounds": int(entry.get("ContractRounds") or 0),
+        "start_health": int(stats.get("HP") or 0),
+        "start_focus": int(stats.get("FOC") or 0),
+        "start_things": start_things,
+    }
+
+
+def playable_class_names() -> list[str]:
+    """PLAYER-tagged character configs (the class-swap targets), sorted."""
+    characters = _load_asset_json("Characters.json")
+    names = [
+        str(name)
+        for name, entry in sorted(characters.items())
+        if isinstance(entry, dict) and "PLAYER" in (entry.get("Tags") or [])
+    ]
+    return names
+
+
+HEALER_PASSIVES = frozenset({"SKILL_PARTYHEAL", "SKILL_MEDIC"})
+
+
+def healer_class_names() -> set[str]:
+    """Character configs whose passives mark them as healers/medics.
+
+    The save stores only a character's ``ConfigName`` (its class), never its
+    passives, so healing ability has to be derived from ``Characters.json``:
+    any config whose ``Passives`` include ``SKILL_PARTYHEAL`` or ``SKILL_MEDIC``
+    (in the base game, HERBALIST and MONK).  Empty when assets are missing.
+    """
+    characters = _load_asset_json("Characters.json")
+    return {
+        str(name)
+        for name, entry in characters.items()
+        if isinstance(entry, dict)
+        and HEALER_PASSIVES.intersection(entry.get("Passives") or [])
+    }
+
+
+_comp_family_re = re.compile(r"^(.*)_\d+$")
+
+
+def _companion_tiers(family: str) -> list[int]:
+    """Tier levels actually present for a companion ``<_family>`` prefix."""
+    characters = _load_asset_json("Characters.json")
+    return sorted(
+        int(match.group(1))
+        for key in characters
+        if isinstance(key, str)
+        and (match := re.match(rf"^{re.escape(family)}_(\d+)$", key))
+    )
+
+
+def companion_catalog() -> list[dict[str, Any]]:
+    """Available pet/companion recruit families from ``Followers.json``.
+
+    Each record: ``{"class_name", "config_base", "contract_rounds", "rarity",
+    "tiers"}`` where ``tiers`` lists the levels actually present in
+    ``Characters.json`` for the family (companions usually ship 0-7).
+    Companion families with no resolvable character config (e.g.
+    ``COMPANION_REFLECTION``) are omitted. Sorted by display label.
+    """
+    followers = _load_asset_json("Followers.json")
+    catalog: list[dict[str, Any]] = []
+    for class_name, entry in followers.items():
+        if not isinstance(entry, dict) or entry.get("Type") != "COMPANION":
+            continue
+        base = str(entry.get("ConfigName") or "")
+        if not base:
+            continue
+        match = _comp_family_re.match(base)
+        family = match.group(1) if match else base
+        tiers = _companion_tiers(family)
+        if not tiers:
+            continue
+        catalog.append(
+            {
+                "class_name": class_name,
+                "config_base": base,
+                "contract_rounds": entry.get("ContractRounds"),
+                "rarity": entry.get("Rarity"),
+                "tiers": tiers,
+            }
+        )
+    catalog.sort(key=lambda row: str(row["class_name"]))
+    return catalog
+
+
+def companion_spec(class_name: str, tier: int = 0) -> dict[str, Any] | None:
+    """Build the ``add_pet`` spec for a companion family and tier.
+
+    Returns ``None`` (fail-closed) when the family is unknown, has no
+    character config, or the tier is out of range. Pets spawn with no gear;
+    ``add_pet`` adds 50 kibble and an XP counter automatically.
+    """
+    followers = _load_asset_json("Followers.json")
+    characters = _load_asset_json("Characters.json")
+    entry = followers.get(class_name)
+    if not isinstance(entry, dict) or entry.get("Type") != "COMPANION":
+        return None
+    base = str(entry.get("ConfigName") or "")
+    if not base:
+        return None
+    match = _comp_family_re.match(base)
+    family = match.group(1) if match else base
+
+    available = _companion_tiers(family)
+    if tier not in available:
+        return None
+
+    config_name = f"{family}_{tier:02d}"
+    config = characters.get(config_name)
+    if not isinstance(config, dict):
+        return None
+    stats = config.get("Stats") if isinstance(config.get("Stats"), dict) else {}
+    return {
+        "class_name": class_name,
+        "type_args": class_name,
+        "config_name": config_name,
+        "contract_rounds": int(entry.get("ContractRounds") or 0),
+        "start_health": int(stats.get("HP") or 0),
+        "start_focus": 1,  # real companion entities carry 1 focus
+        "start_things": [],
     }

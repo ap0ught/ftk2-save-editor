@@ -277,6 +277,17 @@ def test_followers_surface_in_party(save):
     )
 
 
+def test_pet_owners_are_player_hosts_with_companion_followers(save):
+    view = vm.load_save_view(save["run"])
+    # hero-1's follower is a COMPANION; hero-2's is a MERCENARY.
+    assert view["pet_owners"] == {"hero-1"}
+
+
+def test_pet_owners_empty_for_user_save(save):
+    view = vm.load_save_view(save["user"])
+    assert view["pet_owners"] == set()
+
+
 def test_malformed_player_followers_shape_is_ignored(save):
     run = _make_run()
     run["PlayerFollowers"] = ["not", "a", "mapping"]
@@ -288,6 +299,28 @@ def test_malformed_player_followers_shape_is_ignored(save):
         row.get("guid") not in {"follower-1", "follower-2"}
         for row in view["party"]
     )
+
+
+def test_party_rows_carry_follower_bindings(save):
+    view = vm.load_save_view(save["run"])
+    by = {row["guid"]: row for row in view["party"]}
+    assert by["hero-1"]["follower_guid"] == "follower-1"
+    assert by["hero-1"]["follower_name"] == "Sparky"
+    assert by["hero-2"]["follower_guid"] == "follower-2"
+    assert by["follower-1"]["follows_guid"] == "hero-1"
+    assert by["follower-1"]["follows_name"] == "Alaric"
+    assert by["follower-2"]["follows_guid"] == "hero-2"
+    assert by["follower-2"]["follows_name"] == "Liora"
+    assert by["hero-1"]["follows_guid"] is None
+    assert view["followers"] == {
+        "hero-1": "follower-1",
+        "hero-2": "follower-2",
+    }
+
+
+def test_view_followers_empty_for_user_save(save):
+    view = vm.load_save_view(save["user"])
+    assert view["followers"] == {}
 
 
 def test_party_from_entities_deduplicates_by_guid_not_name():
@@ -328,3 +361,186 @@ def test_party_from_entities_deduplicates_by_guid_not_name():
     assert guids == {"follower-a", "follower-b"}
     # Both have the same name but distinct GUIDs
     assert len(party) == 2
+
+
+# --- Asset-catalog helpers ----------------------------------------------------
+
+
+@pytest.fixture
+def assets(tmp_path: Path, monkeypatch):
+    """Synthetic Followers.json + Characters.json behind a patched assets dir."""
+    assets_dir = tmp_path / "Assets"
+    assets_dir.mkdir()
+    followers = {
+        "MERC_ARCHER_01": {
+            "Type": "MERCENARY",
+            "ConfigName": "MERC_ARCHER_BASIC_00",
+            "ContractRounds": 8,
+            "Rarity": "COMMON",
+        },
+        "MERC_GUN_01": {
+            "Type": "MERCENARY",
+            "ConfigName": "MERC_GUN_BASIC_00",
+            "ContractRounds": 6,
+            "Rarity": "RARE",
+        },
+        "NOT_A_FOLLOWER": {"Type": "TRAINING_DUMMY", "ConfigName": "MISC_X"},
+        "BAD_ENTRY": "just-a-string",
+    }
+    characters = {
+        "MERC_ARCHER_BASIC_00": {"Tags": ["MERCENARY"], "Stats": {"HP": 80, "FOC": 20}, "Things": {"BOW_ARCHER_TINY_00": 1, "QUIVER_BASIC_00": 1}},
+        "MERC_ARCHER_BASIC_03": {"Tags": ["MERCENARY"], "Stats": {"HP": 105, "FOC": 20}, "Things": {"BOW_ARCHER_TINY_03": 1}},
+        "MERC_GUN_BASIC_00": {"Tags": ["MERCENARY"], "Stats": {"HP": 90}, "Things": {}},
+        "MERC_GUN_BASIC_06": {"Tags": ["MERCENARY"], "Stats": {"HP": 120}, "Things": {"GUN_MILITIA_TINY_03": 1}},
+        "ALCHEMIST": {"Tags": ["PLAYER"], "Stats": {"HP": 60}, "Things": {}, "Passives": ["SKILL_PARTYHEAL"]},
+        "BLACKSMITH": {"Tags": ["PLAYER"], "Stats": {"HP": 75}, "Things": {}, "Passives": ["SKILL_MEND"]},
+        "HUNTER": {"Tags": ["PLAYER", "STARTER"], "Stats": {"HP": 70}, "Things": {}, "Passives": ["SKILL_MEDIC"]},
+        "SPIDER": {"Tags": ["ENEMY"], "Stats": {"HP": 30}, "Things": {}},
+    }
+    (assets_dir / "Followers.json").write_text(json.dumps(followers))
+    (assets_dir / "Characters.json").write_text(json.dumps(characters))
+    monkeypatch.setattr(vm, "FTK2_ASSETS_DIR", assets_dir)
+    vm._asset_cache.clear()
+    return assets_dir
+
+
+def test_mercenary_catalog_lists_only_mercenary_families(assets):
+    catalog = vm.mercenary_catalog()
+    names = [row["class_name"] for row in catalog]
+    assert names == ["MERC_ARCHER_01", "MERC_GUN_01"]
+    archer = catalog[0]
+    assert archer["config_base"] == "MERC_ARCHER_BASIC_00"
+    assert archer["contract_rounds"] == 8
+    assert archer["rarity"] == "COMMON"
+    assert archer["tiers"] == [0, 3]  # only the levels present in Characters.json
+
+
+def test_mercenary_spec_builds_config_for_known_tier(assets):
+    spec = vm.mercenary_spec("MERC_GUN_01", 6)
+    assert spec is not None
+    assert spec["config_name"] == "MERC_GUN_BASIC_06"
+    assert spec["contract_rounds"] == 6
+    assert spec["start_health"] == 120
+    assert spec["type_args"] == "MERC_GUN_01"
+    assert spec["start_things"] == ["GUN_MILITIA_TINY_03"]
+
+
+def test_mercenary_spec_missing_tier_returns_none(assets):
+    assert vm.mercenary_spec("MERC_GUN_01", 4) is None
+    assert vm.mercenary_spec("MERC_ARCHER_01", 7) is None
+
+
+def test_mercenary_spec_unknown_class_returns_none(assets):
+    assert vm.mercenary_spec("MERC_GHOST_01", 0) is None
+    assert vm.mercenary_spec("NOT_A_FOLLOWER", 0) is None
+
+
+def test_merc_catalog_empty_when_assets_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(vm, "FTK2_ASSETS_DIR", tmp_path / "nope")
+    vm._asset_cache.clear()
+    assert vm.mercenary_catalog() == []
+    assert vm.mercenary_spec("MERC_GUN_01", 0) is None
+    assert vm.playable_class_names() == []
+
+
+def test_playable_class_names_returns_player_tagged_sorted(assets):
+    assert vm.playable_class_names() == ["ALCHEMIST", "BLACKSMITH", "HUNTER"]
+
+
+def test_healer_class_names_uses_partyheal_or_medic_passives(assets):
+    # ALCHEMIST has SKILL_PARTYHEAL, HUNTER has SKILL_MEDIC; BLACKSMITH's
+    # SKILL_MEND is not a party heal and must not qualify.
+    assert vm.healer_class_names() == {"ALCHEMIST", "HUNTER"}
+
+
+def test_healer_class_names_empty_when_assets_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(vm, "FTK2_ASSETS_DIR", tmp_path / "nope")
+    vm._asset_cache.clear()
+    assert vm.healer_class_names() == set()
+
+
+def test_companion_catalog_lists_resolvable_families(assets):
+    # companions need a Followers.json with COMPANION entries; reuse the same
+    # assets dir by adding companion rows to it.
+    followers = {
+        "COMPANION_RAT_01": {"Type": "COMPANION", "ConfigName": "COMPANION_RAT_BASIC_00", "ContractRounds": 0, "Rarity": "COMMON"},
+        "COMPANION_WOLF_02": {"Type": "COMPANION", "ConfigName": "COMPANION_WOLF_SPECIAL_00", "ContractRounds": 0, "Rarity": "RARE"},
+        "COMPANION_REFLECTION": {"Type": "COMPANION", "ConfigName": None},
+    }
+    characters_new = {
+        "COMPANION_RAT_BASIC_00": {"Tags": ["COMPANION"], "Stats": {"HP": 80}, "Things": {}},
+        "COMPANION_RAT_BASIC_03": {"Tags": ["COMPANION"], "Stats": {"HP": 95}, "Things": {}},
+        "COMPANION_WOLF_SPECIAL_00": {"Tags": ["COMPANION"], "Stats": {"HP": 90}, "Things": {}},
+        "COMPANION_WOLF_SPECIAL_07": {"Tags": ["COMPANION"], "Stats": {"HP": 115}, "Things": {}},
+        "ALCHEMIST": {"Tags": ["PLAYER"], "Stats": {"HP": 60}, "Things": {}},
+        "BLACKSMITH": {"Tags": ["PLAYER"], "Stats": {"HP": 75}, "Things": {}},
+        "HUNTER": {"Tags": ["PLAYER", "STARTER"], "Stats": {"HP": 70}, "Things": {}},
+        "SPIDER": {"Tags": ["ENEMY"], "Stats": {"HP": 30}, "Things": {}},
+    }
+    (assets / "Followers.json").write_text(json.dumps(followers))
+    (assets / "Characters.json").write_text(json.dumps(characters_new))
+    vm._asset_cache.clear()
+
+    catalog = vm.companion_catalog()
+    names = [row["class_name"] for row in catalog]
+    assert names == ["COMPANION_RAT_01", "COMPANION_WOLF_02"]  # REFLECTION skipped
+    wolf = catalog[1]
+    assert wolf["config_base"] == "COMPANION_WOLF_SPECIAL_00"
+    assert wolf["tiers"] == [0, 7]
+
+
+def test_companion_spec_builds_config_for_known_tier(assets):
+    followers = {
+        "COMPANION_WOLF_01": {"Type": "COMPANION", "ConfigName": "COMPANION_WOLF_BASIC_00", "ContractRounds": 0, "Rarity": "COMMON"},
+    }
+    characters_new = {
+        "COMPANION_WOLF_BASIC_00": {"Tags": ["COMPANION"], "Stats": {"HP": 80}, "Things": {}},
+        "COMPANION_WOLF_BASIC_06": {"Tags": ["COMPANION"], "Stats": {"HP": 96}, "Things": {}},
+        "ALCHEMIST": {"Tags": ["PLAYER"], "Stats": {"HP": 60}, "Things": {}},
+        "BLACKSMITH": {"Tags": ["PLAYER"], "Stats": {"HP": 75}, "Things": {}},
+        "HUNTER": {"Tags": ["PLAYER", "STARTER"], "Stats": {"HP": 70}, "Things": {}},
+        "SPIDER": {"Tags": ["ENEMY"], "Stats": {"HP": 30}, "Things": {}},
+    }
+    (assets / "Followers.json").write_text(json.dumps(followers))
+    (assets / "Characters.json").write_text(json.dumps(characters_new))
+    vm._asset_cache.clear()
+
+    spec = vm.companion_spec("COMPANION_WOLF_01", 6)
+    assert spec is not None
+    assert spec["config_name"] == "COMPANION_WOLF_BASIC_06"
+    assert spec["contract_rounds"] == 0
+    assert spec["start_health"] == 96
+    assert spec["start_focus"] == 1  # companions carry 1 focus
+    assert spec["type_args"] == "COMPANION_WOLF_01"
+    assert spec["start_things"] == []
+
+
+def test_companion_spec_missing_tier_returns_none(assets):
+    followers = {
+        "COMPANION_WOLF_01": {"Type": "COMPANION", "ConfigName": "COMPANION_WOLF_BASIC_00", "ContractRounds": 0, "Rarity": "COMMON"},
+    }
+    characters_new = {
+        "COMPANION_WOLF_BASIC_00": {"Tags": ["COMPANION"], "Stats": {"HP": 80}, "Things": {}},
+        "COMPANION_WOLF_BASIC_06": {"Tags": ["COMPANION"], "Stats": {"HP": 96}, "Things": {}},
+        "ALCHEMIST": {"Tags": ["PLAYER"], "Stats": {"HP": 60}, "Things": {}},
+        "BLACKSMITH": {"Tags": ["PLAYER"], "Stats": {"HP": 75}, "Things": {}},
+        "HUNTER": {"Tags": ["PLAYER", "STARTER"], "Stats": {"HP": 70}, "Things": {}},
+        "SPIDER": {"Tags": ["ENEMY"], "Stats": {"HP": 30}, "Things": {}},
+    }
+    (assets / "Followers.json").write_text(json.dumps(followers))
+    (assets / "Characters.json").write_text(json.dumps(characters_new))
+    vm._asset_cache.clear()
+
+    assert vm.companion_spec("COMPANION_WOLF_01", 4) is None
+    assert vm.companion_spec("COMPANION_GHOST_01", 0) is None
+
+
+def test_companion_catalog_empty_when_assets_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(vm, "FTK2_ASSETS_DIR", tmp_path / "nope")
+    vm._asset_cache.clear()
+    assert vm.companion_catalog() == []
+    assert vm.companion_spec("COMPANION_WOLF_01", 0) is None
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

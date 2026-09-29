@@ -13,11 +13,12 @@ See ``decompiled/FORMAT.md`` and ``decompiled/SaveGameHelper.cs``.
 
 from __future__ import annotations
 
+import copy
 import json
 import shutil
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Collection
 
 
 # Key from SaveGameHelper.encryptString in FTK2.dll
@@ -33,6 +34,18 @@ FTK2_GAME_DIR = (
 USER_SAVE = FTK2_GAME_DIR / "User.ftk2"
 BACKUPS_DIR = FTK2_GAME_DIR / "Backups"
 GAME_RUNS_DIR = FTK2_GAME_DIR / "GameRuns"
+
+# Game install data: streaming "JSON~" configs (Followers.json, Characters.json,
+# Things/*.json) under For The King II_Data/StreamingAssets/Assets/Configs/JSON~.
+FTK2_ASSETS_DIR = (
+    Path.home()
+    / ".local/share/Steam/steamapps/common/For The King II"
+    / "For The King II_Data"
+    / "StreamingAssets"
+    / "Assets"
+    / "Configs"
+    / "JSON~"
+)
 
 
 def xor_crypt(text: str, key: str = ENCRYPT_KEY) -> str:
@@ -273,6 +286,102 @@ def _dump_json_matching_newlines(obj: Any, sample_text: str) -> str:
     return text
 
 
+def grant_thing_to_party(
+    data: bytes,
+    guids: list[str],
+    config: str,
+    count: int,
+    *,
+    thing_type: str = "ITEM",
+    expansion: str = "BASE",
+) -> tuple[bytes, bool, int]:
+    """Top every party member in *guids* up to *count* of a stackable *config*.
+
+    Unlike ``ensure_*_minimum``, a member who holds none of the item is
+    *given* a fresh stack (fresh ``Id``, ``Type``/``Expansion`` as passed), so
+    this is a grant rather than a top-up; a member already holding it has that
+    stack raised to *count* when it is lower and left alone when it is higher.
+
+    One decrypt/encrypt pass for the whole party (see
+    ``ensure_party_herb_tool_minimum`` for the same shape).  Returns
+    ``(new_data, ok, members_changed)``; ``ok`` is False (data unchanged) for a
+    non-GameRun file, no guids, bad arguments, or a malformed save.
+    """
+    if not guids or not config or not thing_type or not expansion:
+        return data, False, 0
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return data, False, 0
+
+    plain = decrypt_ftk2_bytes(data)
+    parts = _split_gamerun_plain(plain)
+    if parts is None:
+        return data, False, 0
+    summary_text, body_text, joiner = parts
+    try:
+        run = json.loads(body_text)
+    except json.JSONDecodeError:
+        return data, False, 0
+    if not isinstance(run, dict):
+        return data, False, 0
+
+    entities = run.get("Entities")
+    if not isinstance(entities, list):
+        return data, False, 0
+    for e in entities:
+        if not isinstance(e, dict):
+            return data, False, 0
+
+    guid_set = {str(g) for g in guids}
+    changed = 0
+    for entity in entities:
+        if str(entity.get("Guid")) not in guid_set:
+            continue
+        comps = entity.get("Components")
+        if not isinstance(comps, dict):
+            continue
+        cc = comps.get("CharacterComponent")
+        if not isinstance(cc, dict):
+            continue
+        things = cc.get("Things")
+        if not isinstance(things, list):
+            continue
+        for thing in things:
+            if not isinstance(thing, dict):
+                continue
+            if (
+                thing.get("ConfigName") != config
+                or thing.get("Type") != thing_type
+                or thing.get("Expansion") != expansion
+            ):
+                continue
+            try:
+                current = int(thing.get("_stackCount") or 0)
+            except (TypeError, ValueError):
+                current = 0
+            if current < count:
+                thing["_stackCount"] = count
+                changed += 1
+            break
+        else:
+            things.append(
+                {
+                    "Id": str(uuid.uuid4()),
+                    "ConfigName": config,
+                    "Type": thing_type,
+                    "_stackCount": count,
+                    "Expansion": expansion,
+                }
+            )
+            changed += 1
+
+    if changed == 0:
+        return data, True, 0
+
+    new_body = _dump_json_matching_newlines(run, body_text)
+    new_plain = f"//**{summary_text}**//{joiner}{new_body}"
+    return encrypt_ftk2_text(new_plain), True, changed
+
+
 def replace_character_thing(
     data: bytes,
     character_guid: str,
@@ -415,18 +524,121 @@ def add_character_thing(
     return encrypt_ftk2_text(new_plain), True
 
 
+def add_character_thing_stack(
+    data: bytes,
+    character_guid: str,
+    config: str,
+    count: int,
+    *,
+    thing_type: str = "ITEM",
+    expansion: str = "BASE",
+) -> tuple[bytes, bool, int]:
+    """Add *count* of a stackable item to a run character, merging stacks.
+
+    ``add_character_thing`` always appends a single unit with a fresh ``Id``,
+    which is right for equipment but wrong for a stackable like
+    ``MISC_MIRROR_01``.  This bumps the ``_stackCount`` of an existing matching
+    Thing instead, and only appends a new entry when the character carries none,
+    so repeated calls accumulate instead of littering the inventory.
+
+    Returns ``(new_data, ok, total_count)``; ``ok`` is False (data unchanged)
+    for a non-GameRun file, a missing/ambiguous character, bad arguments, or a
+    malformed ``Things`` list.
+    """
+    plain = decrypt_ftk2_bytes(data)
+    parts = _split_gamerun_plain(plain)
+    if parts is None:
+        return data, False, 0
+    summary_text, body_text, joiner = parts
+    try:
+        run = json.loads(body_text)
+    except json.JSONDecodeError:
+        return data, False, 0
+    if (
+        not isinstance(run, dict)
+        or not character_guid
+        or not config
+        or not thing_type
+        or not expansion
+    ):
+        return data, False, 0
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return data, False, 0
+
+    entities = run.get("Entities")
+    if not isinstance(entities, list):
+        return data, False, 0
+    for e in entities:
+        if not isinstance(e, dict):
+            return data, False, 0
+
+    matching_chars = [e for e in entities if e.get("Guid") == character_guid]
+    if len(matching_chars) != 1:
+        return data, False, 0
+    comps = matching_chars[0].get("Components")
+    if not isinstance(comps, dict):
+        return data, False, 0
+    cc = comps.get("CharacterComponent")
+    if not isinstance(cc, dict):
+        return data, False, 0
+    things = cc.get("Things")
+    if not isinstance(things, list):
+        return data, False, 0
+    for t in things:
+        if not isinstance(t, dict):
+            return data, False, 0
+
+    # Merge into the first matching stack; leave any duplicates alone.
+    total = 0
+    for thing in things:
+        if (
+            thing.get("ConfigName") == config
+            and thing.get("Type") == thing_type
+            and thing.get("Expansion") == expansion
+        ):
+            try:
+                current = int(thing.get("_stackCount") or 0)
+            except (TypeError, ValueError):
+                current = 0
+            total = current + count
+            thing["_stackCount"] = total
+            break
+    else:
+        total = count
+        things.append(
+            {
+                "Id": str(uuid.uuid4()),
+                "ConfigName": config,
+                "Type": thing_type,
+                "_stackCount": count,
+                "Expansion": expansion,
+            }
+        )
+
+    new_body = _dump_json_matching_newlines(run, body_text)
+    new_plain = f"//**{summary_text}**//{joiner}{new_body}"
+    return encrypt_ftk2_text(new_plain), True, total
+
+
 def give_carnival_wheel_piece(
     data: bytes,
     character_guid: str,
     *,
     reward: str = "PLAYERS_FULL_HEAL",
+    count: int = 1,
+    replace: bool = False,
 ) -> tuple[bytes, bool]:
-    """Give one Carnival Wheel piece (``MISC_WHEELPIECE_01``) to a run character.
+    """Give Carnival Wheel wedges (``MISC_WHEELPIECE_01``) to a run character.
 
-    Appends the exact thing shape the game uses for a Wheel-of-Death reward
-    (``CustomData.ID`` = ``reward``, stack 1). Fail-closed: returns
-    ``(data, False)`` on non-GameRun saves, invalid structure, duplicate
-    character GUIDs, or when the character already holds a wheel piece.
+    Writes the exact thing shape the game uses for a Wheel-of-Death reward
+    (``CustomData.ID`` = ``reward``).  The config is ``Stacks: true``, so
+    *count* wedges live in a single stack rather than as separate entries.
+
+    A hero who already holds a wedge is a fail-closed ``(data, False)`` unless
+    *replace* is set, which sets the existing stack to *count* instead.
+    Fail-closed: returns ``(data, False)`` on non-GameRun saves, invalid
+    structure, duplicate character GUIDs, a *count* below 1, or an existing
+    wedge with *replace* unset.
     """
     plain = decrypt_ftk2_bytes(data)
     parts = _split_gamerun_plain(plain)
@@ -438,6 +650,8 @@ def give_carnival_wheel_piece(
     except json.JSONDecodeError:
         return data, False
     if not isinstance(run, dict) or not character_guid or not reward:
+        return data, False
+    if not isinstance(count, int) or isinstance(count, bool) or count < 1:
         return data, False
 
     entities = run.get("Entities")
@@ -464,19 +678,91 @@ def give_carnival_wheel_piece(
     for t in things:
         if not isinstance(t, dict):
             return data, False
-        if t.get("ConfigName") == "MISC_WHEELPIECE_01":
+        if t.get("ConfigName") != "MISC_WHEELPIECE_01":
+            continue
+        if not replace:
             return data, False  # already holds one
+        t["_stackCount"] = count  # top the existing stack up / down
+        break
+    else:
+        things.append(
+            {
+                "Id": str(uuid.uuid4()),
+                "ConfigName": "MISC_WHEELPIECE_01",
+                "Type": "ITEM",
+                "_stackCount": count,
+                "CustomData": {"ID": reward},
+                "Expansion": "BASE",
+            }
+        )
+    new_body = _dump_json_matching_newlines(run, body_text)
+    new_plain = f"//**{summary_text}**//{joiner}{new_body}"
+    return encrypt_ftk2_text(new_plain), True
 
-    things.append(
-        {
-            "Id": str(uuid.uuid4()),
-            "ConfigName": "MISC_WHEELPIECE_01",
-            "Type": "ITEM",
-            "_stackCount": 1,
-            "CustomData": {"ID": reward},
-            "Expansion": "BASE",
-        }
-    )
+
+def set_character_thing_stack(
+    data: bytes,
+    character_guid: str,
+    config_name: str,
+    count: int,
+) -> tuple[bytes, bool]:
+    """Set an existing Thing stack in a run character to an absolute *count*.
+
+    The top-up helpers only ever *raise* a stack, so a floor change (e.g.
+    Scholar's Wort from 15 down to its 10) cannot be applied by topping up —
+    that needs a setter.  Only a stack the character already holds is touched;
+    nothing is created or destroyed.
+
+    Fail-closed: returns ``(data, False)`` on non-GameRun saves, invalid
+    structure, a missing/duplicate character GUID, a non-positive *count*, or
+    when the character holds no such stack.
+    """
+    if not character_guid or not config_name:
+        return data, False
+    if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+        return data, False
+    plain = decrypt_ftk2_bytes(data)
+    parts = _split_gamerun_plain(plain)
+    if parts is None:
+        return data, False
+    summary_text, body_text, joiner = parts
+    try:
+        run = json.loads(body_text)
+    except json.JSONDecodeError:
+        return data, False
+    if not isinstance(run, dict):
+        return data, False
+
+    entities = run.get("Entities")
+    if not isinstance(entities, list):
+        return data, False
+    for e in entities:
+        if not isinstance(e, dict):
+            return data, False
+
+    matching = [e for e in entities if e.get("Guid") == character_guid]
+    if len(matching) != 1:
+        return data, False
+    comps = matching[0].get("Components")
+    if not isinstance(comps, dict):
+        return data, False
+    cc = comps.get("CharacterComponent")
+    if not isinstance(cc, dict):
+        return data, False
+    things = cc.get("Things")
+    if not isinstance(things, list):
+        return data, False
+
+    wanted = config_name.upper()
+    hits = [
+        thing
+        for thing in things
+        if isinstance(thing, dict) and str(thing.get("ConfigName") or "").upper() == wanted
+    ]
+    if len(hits) != 1:
+        return data, False  # absent, or ambiguous (two stacks of one config)
+    hits[0]["_stackCount"] = count
+
     new_body = _dump_json_matching_newlines(run, body_text)
     new_plain = f"//**{summary_text}**//{joiner}{new_body}"
     return encrypt_ftk2_text(new_plain), True
@@ -759,14 +1045,23 @@ def ensure_character_herb_tool_minimum(
     character_guid: str,
     *,
     minimum: int = 10,
+    herb_minimum: int | None = None,
+    kibble_minimum: int | None = None,
+    godsbeard_minimum: int | None = None,
+    scholarwort_minimum: int | None = None,
+    pet_owners: Collection[str] | None = None,
+    healers: Collection[str] | None = None,
 ) -> tuple[bytes, bool, int]:
     """Ensure a character has minimum consumable stacks, including safetystones and thrown items.
 
     Matches Things whose ``ConfigName`` contains HERB / TOOL / DRINK / SCROLL /
     SAFETYSTONE / THROW / ORB / CANDY / MISC_INK (or whose ``Type`` is HERB / TOOL),
-    topping each stack below *minimum* up to *minimum*.  Returns ``(new_data, ok,
-    updated_entries)`` where ``ok`` means the character was found in a GameRun
-    file.
+    topping each stack below its target up.  The generic target is *minimum*;
+    optional *herb_minimum* / *kibble_minimum* / *godsbeard_minimum* override it
+    for herbs, for a pet owner's kibble and for a healer's godsbeard respectively.
+    *pet_owners* / *healers* are the guids those conditional floors apply to.
+    Returns ``(new_data, ok, updated_entries)`` where ``ok`` means the character
+    was found in a GameRun file.
     """
     if minimum < 0:
         raise ValueError("minimum must be >= 0")
@@ -800,28 +1095,24 @@ def ensure_character_herb_tool_minimum(
         for thing in things:
             if not isinstance(thing, dict):
                 continue
-            config = str(thing.get("ConfigName") or "").upper()
-            thing_type = str(thing.get("Type") or "").upper()
-            is_supported_consumable = (
-                "HERB" in config
-                or "TOOL" in config
-                or "DRINK" in config
-                or "SCROLL" in config
-                or "SAFETYSTONE" in config
-                or "THROW" in config
-                or "ORB" in config
-                or "CANDY" in config
-                or "MISC_INK" in config
-                or thing_type in {"HERB", "TOOL"}
+            target = _consumable_topup_target(
+                thing,
+                minimum=minimum,
+                herb_minimum=herb_minimum,
+                kibble_minimum=kibble_minimum,
+                godsbeard_minimum=godsbeard_minimum,
+                scholarwort_minimum=scholarwort_minimum,
+                is_pet_owner=bool(pet_owners) and character_guid in pet_owners,
+                is_healer=bool(healers) and character_guid in healers,
             )
-            if not is_supported_consumable:
+            if target is None:
                 continue
             try:
                 count = int(thing.get("_stackCount") or 0)
             except (TypeError, ValueError):
                 count = 0
-            if count < minimum:
-                thing["_stackCount"] = int(minimum)
+            if count < target:
+                thing["_stackCount"] = int(target)
                 updated_entries += 1
         break
 
@@ -840,12 +1131,24 @@ def ensure_party_herb_tool_minimum(
     guids: list[str],
     *,
     minimum: int = 10,
+    herb_minimum: int | None = None,
+    kibble_minimum: int | None = None,
+    godsbeard_minimum: int | None = None,
+    scholarwort_minimum: int | None = None,
+    pet_owners: Collection[str] | None = None,
+    healers: Collection[str] | None = None,
 ) -> tuple[bytes, bool, int]:
     """Top up consumables for every party member listed in *guids*.
 
     Unlike repeatedly calling ``ensure_character_herb_tool_minimum`` (which
     decrypts/encrypts once per guid), this parses the GameRun once, mutates
     each character's Things in a single pass, and serializes once.
+
+    *minimum* is the generic floor; *herb_minimum* / *kibble_minimum* /
+    *godsbeard_minimum* / *scholarwort_minimum* are the optional specialised
+    floors (herbs, a pet owner's kibble, a healer's godsbeard, Scholar's Wort
+    — see ``_consumable_topup_target``).  *pet_owners* / *healers* are guid
+    collections deciding who those conditional floors apply to.
     """
     if minimum < 0:
         raise ValueError("minimum must be >= 0")
@@ -881,31 +1184,29 @@ def ensure_party_herb_tool_minimum(
         things = cc.get("Things") or []
         if not isinstance(things, list):
             continue
+        is_pet_owner = bool(pet_owners) and guid in pet_owners
+        is_healer = bool(healers) and guid in healers
         for thing in things:
             if not isinstance(thing, dict):
                 continue
-            config = str(thing.get("ConfigName") or "").upper()
-            thing_type = str(thing.get("Type") or "").upper()
-            is_supported_consumable = (
-                "HERB" in config
-                or "TOOL" in config
-                or "DRINK" in config
-                or "SCROLL" in config
-                or "SAFETYSTONE" in config
-                or "THROW" in config
-                or "ORB" in config
-                or "CANDY" in config
-                or "MISC_INK" in config
-                or thing_type in {"HERB", "TOOL"}
+            target = _consumable_topup_target(
+                thing,
+                minimum=minimum,
+                herb_minimum=herb_minimum,
+                kibble_minimum=kibble_minimum,
+                godsbeard_minimum=godsbeard_minimum,
+                scholarwort_minimum=scholarwort_minimum,
+                is_pet_owner=is_pet_owner,
+                is_healer=is_healer,
             )
-            if not is_supported_consumable:
+            if target is None:
                 continue
             try:
                 count = int(thing.get("_stackCount") or 0)
             except (TypeError, ValueError):
                 count = 0
-            if count < minimum:
-                thing["_stackCount"] = int(minimum)
+            if count < target:
+                thing["_stackCount"] = int(target)
                 total_updated += 1
 
     if not any_found:
@@ -992,6 +1293,68 @@ def ensure_party_food_minimum(
 
 
 CONSUMABLE_TOKENS = ("HERB", "DRINK", "TOOL", "SCROLL", "SAFETYSTONE", "ORB", "CANDY", "MISC_INK")
+
+# Party top-up policy (GUI "Top up consumables"): herbs reach 15, a pet owner's
+# kibble reaches 50, and a healer's godsbeard reaches 50.  Everything else
+# consumable tops up to the generic ``minimum``.
+GODSBEARD_CONFIG = "HERB_GODSBEARD_01"
+KIBBLE_CONFIG = "TOOL_KIBBLE_01"
+# Scholar's Wort is a herb, but not a potion: its only ability is
+# BASIC_XP_ADD_01 ("Use this herb to gain {0} XP") and its config Value is 10,
+# so it gets its own floor instead of the generic herb one.
+SCHOLARWORT_CONFIG = "HERB_SCHOLARWORT_01"
+HERB_STACK_MINIMUM = 15
+KIBBLE_STACK_MINIMUM = 50
+GODSBEARD_STACK_MINIMUM = 50
+SCHOLARWORT_STACK_MINIMUM = 10
+
+
+def _consumable_topup_target(
+    thing: dict[str, Any],
+    *,
+    minimum: int,
+    herb_minimum: int | None = None,
+    kibble_minimum: int | None = None,
+    godsbeard_minimum: int | None = None,
+    scholarwort_minimum: int | None = None,
+    is_pet_owner: bool = False,
+    is_healer: bool = False,
+) -> int | None:
+    """Target stack count for a consumable *thing*, or ``None`` to skip it.
+
+    ``minimum`` is the generic floor for any supported consumable.  The
+    specialised floors are opt-in (skipped when ``None``): ``herb_minimum``
+    raises every herb, ``scholarwort_minimum`` overrides that one XP herb,
+    ``kibble_minimum`` applies only to pet owners, and ``godsbeard_minimum``
+    only to healers.
+    """
+    config = str(thing.get("ConfigName") or "").upper()
+    thing_type = str(thing.get("Type") or "").upper()
+    is_supported = (
+        "HERB" in config
+        or "TOOL" in config
+        or "DRINK" in config
+        or "SCROLL" in config
+        or "SAFETYSTONE" in config
+        or "THROW" in config
+        or "ORB" in config
+        or "CANDY" in config
+        or "MISC_INK" in config
+        or thing_type in {"HERB", "TOOL"}
+    )
+    if not is_supported:
+        return None
+    if kibble_minimum is not None and config == KIBBLE_CONFIG:
+        # Kibble only matters for characters that actually own a pet.
+        return kibble_minimum if is_pet_owner else None
+    if godsbeard_minimum is not None and config == GODSBEARD_CONFIG and is_healer:
+        return godsbeard_minimum
+    if scholarwort_minimum is not None and config == SCHOLARWORT_CONFIG:
+        # Checked before the herb rule: it is a herb, but with its own floor.
+        return scholarwort_minimum
+    if herb_minimum is not None and ("HERB" in config or thing_type == "HERB"):
+        return herb_minimum
+    return minimum
 
 
 def _is_consumable(thing: dict[str, Any]) -> bool:
@@ -1166,6 +1529,850 @@ def carry_over_consumables(target: bytes, source: bytes) -> tuple[bytes, bool, i
 def set_local_stat(data: bytes, stat_name: str, value: int) -> tuple[bytes, bool]:
     """Convenience wrapper for ``LocalStats`` integer edits."""
     return edit_field(data, f"LocalStats.{stat_name}", str(int(value)))
+
+
+# Default appearance used when building a fresh mercenary. Matches the exact
+# AvatarComponent the game serializes for a base mercenary (verified from a
+# real GameRun); copy-compatible with players that carry extra fields such as
+# "BodyType".
+_DEFAULT_MERC_AVATAR: dict[str, Any] = {
+    "EquipmentSlotVisibility": {},
+    "PrimaryColor": "3C3A39FF",
+    "SecondaryColor": "425454FF",
+    "SkinColor": "A86957FF",
+    "HairColor": "73513BFF",
+    "SkinColorOverride": "",
+    "OverrideSkinMaterial": False,
+    "OverrideSkinMaterialIndex": 0,
+    "IsLefty": False,
+    "ScaleMultiplier": 1,
+    "Scale": {"X": 0.987300098, "Y": 0.987300098, "Z": 0.987300098},
+    "Position": {"X": 0, "Y": 0, "Z": 0},
+    "SkinDirty": False,
+    "EquipmentDirty": False,
+    "StatusDirty": True,
+    "PortraitDirty": True,
+}
+
+
+def _follower_avatar(host_avatar: Any) -> dict[str, Any]:
+    """Avatar shape for a follower entity we inject into a run.
+
+    Game-created followers never carry ``BodyType`` in their serialized
+    AvatarComponent: the game reads ``CharacterComponent.ConfigName`` in its
+    plain form and resolves tier records via ``Index.dCharacter``.  If a
+    follower DID carry ``BodyType`` (players do), ``CharacterVisualHelper``
+    rewrites the config as ``{ConfigName}_{BodyType}`` and then looks that up
+    in ``Configs.Characters`` (Characters.json), which has no gender-suffixed
+    keys -- a ``KeyNotFoundException`` on load (the ``..._02_M`` / ``..._02_F``
+    crashes).  A plain config name with no ``BodyType`` takes the fallback path
+    that never throws.
+
+    Copies the palette/flags the host carries for the exact keys the game
+    serializes for a base follower, but never ``BodyType`` or player-only
+    fields.
+    """
+    base = dict(_DEFAULT_MERC_AVATAR)
+    if isinstance(host_avatar, dict):
+        for key in _DEFAULT_MERC_AVATAR:
+            if key in host_avatar:
+                base[key] = host_avatar[key]
+    return base
+
+
+def _occupied_tiles(
+    entities: list[Any],
+    *,
+    exclude_guids: Collection[str] = (),
+) -> set[tuple[int, int]]:
+    """Venue tiles already claimed by entities in a run's ``Entities`` list.
+
+    Only 1x1 venues are considered (every player and follower in a real save is
+    one), so a multi-tile venue is skipped rather than half-counted.
+    """
+    skip = {str(g) for g in exclude_guids}
+    taken: set[tuple[int, int]] = set()
+    for entity in entities:
+        if not isinstance(entity, dict) or str(entity.get("Guid")) in skip:
+            continue
+        venue = (entity.get("Components") or {}).get("VenueComponent")
+        if not isinstance(venue, dict):
+            continue
+        size = venue.get("TileSize")
+        if isinstance(size, dict) and (size.get("Item1") or 1) != 1:
+            continue
+        pos = venue.get("TilePosition")
+        if not isinstance(pos, dict):
+            continue
+        try:
+            taken.add((int(pos.get("Item1") or 0), int(pos.get("Item2") or 0)))
+        except (TypeError, ValueError):
+            continue
+    return taken
+
+
+def _follower_placement(
+    host_comps: dict[str, Any],
+    taken: Collection[tuple[int, int]] = (),
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Adventure/venue components for a follower injected next to *host_comps*.
+
+    A follower is only drawn if it carries both, and the game always writes
+    both for a bound one: ``AdventureComponent`` repeats the host's hex and
+    map verbatim, and ``VenueComponent`` is a 1x1 venue on a tile *beside* the
+    host's (observed ``{Item1: 3, Item2: n}`` -> ``{Item1: 4, Item2: n}``).  A
+    follower entity with neither component — which is what an unbound recruit
+    template looks like in ``Entities`` — is never placed, so the game keeps it
+    invisible: no hex, no tile, nothing on screen.
+
+    The hex is copied as-is (that is what the game does; the follower's world
+    position is driven by its venue tile).  The venue tile starts beside the
+    host and walks outward until it lands on a tile not in *taken*, so a party
+    where several heroes each have a follower does not stack them all on one
+    tile; the host's own tile is the last resort.  Falls back to the origin for
+    a host with no position components, which is still better than writing
+    none.
+    """
+    host_adventure = host_comps.get("AdventureComponent")
+    host_venue = host_comps.get("VenueComponent")
+    adventure: dict[str, Any] = (
+        dict(host_adventure)
+        if isinstance(host_adventure, dict)
+        else {"HexPosition": {"Item1": 0, "Item2": 0}, "MapID": ""}
+    )
+    if not isinstance(host_venue, dict):
+        return adventure, {
+            "TilePosition": {"Item1": 1, "Item2": 0},
+            "TileSize": {"Item1": 1, "Item2": 1},
+            "OccupiedTiles": [{"Item1": 1, "Item2": 0}],
+        }
+
+    venue = copy.deepcopy(host_venue)
+    pos = venue.get("TilePosition")
+    if not isinstance(pos, dict):
+        return adventure, venue
+    try:
+        col = int(pos.get("Item1") or 0)
+        row = int(pos.get("Item2") or 0)
+    except (TypeError, ValueError):
+        return adventure, venue
+    occupied = {(int(a), int(b)) for a, b in taken}
+    chosen = (col, row)
+    for delta_col, delta_row in ((1, 0), (-1, 0), (0, 1), (0, -1), (0, 0)):
+        candidate = (col + delta_col, row + delta_row)
+        if candidate not in occupied or candidate == (col, row):
+            chosen = candidate
+            break
+    pos["Item1"], pos["Item2"] = chosen
+    venue["TilePosition"] = pos
+    if "OccupiedTiles" in venue:
+        venue["OccupiedTiles"] = [{"Item1": chosen[0], "Item2": chosen[1]}]
+    return adventure, venue
+
+
+def _follower_slot_taken(run: dict[str, Any], host_player_guid: str) -> bool:
+    """True when *host_player_guid* already has a follower bound to it.
+
+    ``PlayerFollowers`` is a map keyed by player GUID, so a host holds at most
+    one follower.  Recruiting without this guard silently overwrites the
+    binding and leaves the previous follower entity orphaned in ``Entities``
+    (still spendable/AI-driven, but owned by nobody), so both ``add_pet`` and
+    ``add_mercenary`` fail closed instead.  An entry with a missing/empty
+    ``FollowerID`` is not a binding, so it does not block a recruit.
+    """
+    followers = run.get("PlayerFollowers")
+    if not isinstance(followers, dict):
+        return False
+    state = followers.get(host_player_guid)
+    if not isinstance(state, dict):
+        return False
+    return bool(state.get("FollowerID"))
+
+
+def add_mercenary(
+    data: bytes,
+    host_player_guid: str,
+    spec: dict[str, Any],
+) -> tuple[bytes, bool, str]:
+    """Add a mercenary follower to a run, bound to the given player.
+
+    ``spec`` describes what to build, e.g. from ``viewmodel.mercenary_spec``:
+
+    ``{"type_args": "MERC_GUN_01", "config_name": "MERC_GUN_BASIC_06",
+    "contract_rounds": 6, "start_health": 120, "start_focus": 0,
+    "start_things": ["GUN_MILITIA_TINY_03"]}``
+
+    Produces one new placeholder entity (CharacterComponent + AIComponent +
+    game-shaped avatar + adventure/venue copied from the host so it spawns
+    beside the party) and registers it in ``PlayerFollowers`` for the host
+    player.
+
+    Fail-closed: returns ``(data, False, "")`` on non-GameRun data, invalid
+    structure, an unknown or non-player host, duplicate host GUIDs, an empty
+    spec, or a host that already has a follower bound in ``PlayerFollowers``
+    (a host holds one at a time; remove the current one first, otherwise the
+    old follower would be orphaned).
+    """
+    plain = decrypt_ftk2_bytes(data)
+    parts = _split_gamerun_plain(plain)
+    if parts is None:
+        return data, False, ""
+    summary_text, body_text, joiner = parts
+    try:
+        run = json.loads(body_text)
+    except json.JSONDecodeError:
+        return data, False, ""
+    if (
+        not isinstance(run, dict)
+        or not isinstance(spec, dict)
+        or not host_player_guid
+        or not spec.get("config_name")
+    ):
+        return data, False, ""
+
+    entities = run.get("Entities")
+    if not isinstance(entities, list):
+        return data, False, ""
+    for e in entities:
+        if not isinstance(e, dict):
+            return data, False, ""
+
+    hosts = [e for e in entities if e.get("Guid") == host_player_guid]
+    if len(hosts) != 1:
+        return data, False, ""
+    host = hosts[0]
+    host_comps = host.get("Components")
+    if not isinstance(host_comps, dict) or not isinstance(
+        host_comps.get("PlayerComponent"), dict
+    ):
+        return data, False, ""
+    if _follower_slot_taken(run, host_player_guid):
+        return data, False, ""
+
+    new_guid = str(uuid.uuid4())
+    thing_ids: list[str] = []
+    things: list[dict[str, Any]] = []
+    for config in spec.get("start_things") or []:
+        if not isinstance(config, str) or not config:
+            continue
+        thing_id = str(uuid.uuid4())
+        thing_ids.append(thing_id)
+        things.append(
+            {
+                "Id": thing_id,
+                "ConfigName": config,
+                "Type": "EQUIPMENT",
+                "_stackCount": 1,
+                "Expansion": "BASE",
+            }
+        )
+
+    equipped: dict[str, str] = {
+        "MAIN_HAND": thing_ids[0] if thing_ids else "",
+        "OFF_HAND": "",
+        "HELMET": "",
+        "ARMOR": "",
+        "GLOVES": "",
+        "BOOTS": "",
+        "TRINKET": "",
+        "BACKPACK": "",
+        "PIPE": "",
+    }
+
+    character_component: dict[str, Any] = {
+        "ConfigName": spec["config_name"],
+        "CurrentHealth": int(spec.get("start_health") or 0),
+        "CurrentFocus": int(spec.get("start_focus") or 0),
+        "ExtraLives": 0,
+        "NecroLives": 0,
+        "ExtraLevel": 0,
+        "CharacterType": "MERCENARY",
+        "TypeArgs": str(spec.get("type_args") or ""),
+        "GroupIndex": 0,
+        "Things": things,
+        "Equipped": equipped,
+        "SkinEquipped": {},
+        "BaseStatModifiers": {},
+        "State": "DEFAULT",
+    }
+
+    host_avatar = host_comps.get("AvatarComponent")
+    avatar = _follower_avatar(host_avatar)
+    adventure, venue = _follower_placement(
+        host_comps, _occupied_tiles(entities, exclude_guids=(host_player_guid,))
+    )
+
+    entity: dict[str, Any] = {
+        "Guid": new_guid,
+        "Components": {
+            "CharacterComponent": character_component,
+            "AIComponent": {},
+            "AvatarComponent": avatar,
+            "AdventureComponent": adventure,
+            "VenueComponent": venue,
+        },
+    }
+    entities.append(entity)
+
+    followers = run.get("PlayerFollowers")
+    if not isinstance(followers, dict):
+        followers = {}
+        run["PlayerFollowers"] = followers
+    followers[host_player_guid] = {
+        "FollowerID": new_guid,
+        "RoundsToExpire": int(spec.get("contract_rounds") or 0),
+    }
+
+    new_body = _dump_json_matching_newlines(run, body_text)
+    new_plain = f"//**{summary_text}**//{joiner}{new_body}"
+    return encrypt_ftk2_text(new_plain), True, new_guid
+
+
+def swap_character_class(
+    data: bytes,
+    character_guid: str,
+    new_config: str,
+) -> tuple[bytes, bool]:
+    """Change a run character's class by updating ``CharacterComponent.ConfigName``.
+
+    The chosen config must be a playable class config (see
+    ``viewmodel.playable_class_names``) for a meaningful result; the game
+    derives stats/starting gear from ``Characters.json`` on load. NPCs without
+    a CharacterComponent are unchanged.
+
+    Fail-closed: returns ``(data, False)`` on non-GameRun data, invalid
+    structure, or an unknown/duplicate character GUID.
+    """
+    plain = decrypt_ftk2_bytes(data)
+    parts = _split_gamerun_plain(plain)
+    if parts is None:
+        return data, False
+    summary_text, body_text, joiner = parts
+    try:
+        run = json.loads(body_text)
+    except json.JSONDecodeError:
+        return data, False
+    if not isinstance(run, dict) or not character_guid or not new_config:
+        return data, False
+
+    entities = run.get("Entities")
+    if not isinstance(entities, list):
+        return data, False
+    for e in entities:
+        if not isinstance(e, dict):
+            return data, False
+
+    matching = [e for e in entities if e.get("Guid") == character_guid]
+    if len(matching) != 1:
+        return data, False
+    entity = matching[0]
+    comps = entity.get("Components")
+    if not isinstance(comps, dict):
+        return data, False
+    cc = comps.get("CharacterComponent")
+    if not isinstance(cc, dict):
+        return data, False
+    cc["ConfigName"] = new_config
+
+    new_body = _dump_json_matching_newlines(run, body_text)
+    new_plain = f"//**{summary_text}**//{joiner}{new_body}"
+    return encrypt_ftk2_text(new_plain), True
+
+
+def add_pet(
+    data: bytes,
+    host_player_guid: str,
+    spec: dict[str, Any],
+) -> tuple[bytes, bool, str]:
+    """Add a companion pet to a run, bound to the given player.
+
+    ``spec`` describes what to build, e.g. from ``viewmodel.companion_spec``:
+
+    ``{"type_args": "COMPANION_RAT_01", "config_name": "COMPANION_RAT_BASIC_06",
+    "contract_rounds": 0, "start_health": 95, "start_focus": 1,
+    "start_things": []}``
+
+    Produces one new placeholder entity (CharacterComponent + AIComponent +
+    game-shaped avatar + adventure/venue copied from the host so it spawns
+    beside the party) and registers it in ``PlayerFollowers`` for the host
+    player.  The pet is given ``KIBBLE_CONFIG`` x50 and an XP counter, matching
+    how the game stores its own companions.
+
+    The adventure/venue pair is not optional: the game only draws a follower
+    that has both, so a pet written without them is bound and alive in the
+    save but invisible on the map.  See ``_follower_placement``.
+
+    Fail-closed: returns ``(data, False, "")`` on non-GameRun data, invalid
+    structure, an unknown or non-player host, duplicate host GUIDs, an empty
+    spec, or a host that already has a follower bound in ``PlayerFollowers``
+    (a host holds one at a time; remove the current one first, otherwise the
+    old follower would be orphaned).
+    """
+    plain = decrypt_ftk2_bytes(data)
+    parts = _split_gamerun_plain(plain)
+    if parts is None:
+        return data, False, ""
+    summary_text, body_text, joiner = parts
+    try:
+        run = json.loads(body_text)
+    except json.JSONDecodeError:
+        return data, False, ""
+    if (
+        not isinstance(run, dict)
+        or not isinstance(spec, dict)
+        or not host_player_guid
+        or not spec.get("config_name")
+    ):
+        return data, False, ""
+
+    entities = run.get("Entities")
+    if not isinstance(entities, list):
+        return data, False, ""
+    for e in entities:
+        if not isinstance(e, dict):
+            return data, False, ""
+
+    hosts = [e for e in entities if e.get("Guid") == host_player_guid]
+    if len(hosts) != 1:
+        return data, False, ""
+    host = hosts[0]
+    host_comps = host.get("Components")
+    if not isinstance(host_comps, dict) or not isinstance(
+        host_comps.get("PlayerComponent"), dict
+    ):
+        return data, False, ""
+
+    if _follower_slot_taken(run, host_player_guid):
+        return data, False, ""
+
+    new_guid = str(uuid.uuid4())
+    things: list[dict[str, Any]] = [
+        {
+            "Id": str(uuid.uuid4()),
+            "ConfigName": "XP",
+            "Type": "PASSIVE",
+            "_stackCount": 0,
+            "Expansion": "BASE",
+        },
+        {
+            "Id": str(uuid.uuid4()),
+            "ConfigName": KIBBLE_CONFIG,
+            "Type": "ITEM",
+            "_stackCount": KIBBLE_STACK_MINIMUM,
+            "Expansion": "BASE",
+        },
+    ]
+
+    character_component: dict[str, Any] = {
+        "ConfigName": spec["config_name"],
+        "CurrentHealth": int(spec.get("start_health") or 0),
+        "CurrentFocus": int(spec.get("start_focus") or 1),
+        "ExtraLives": 0,
+        "NecroLives": 0,
+        "ExtraLevel": 0,
+        "CharacterType": "COMPANION",
+        "TypeArgs": str(spec.get("type_args") or ""),
+        "GroupIndex": 1,
+        "Things": things,
+        "Equipped": {
+            "MAIN_HAND": "",
+            "OFF_HAND": "",
+            "HELMET": "",
+            "ARMOR": "",
+            "GLOVES": "",
+            "BOOTS": "",
+            "TRINKET": "",
+            "BACKPACK": "",
+            "PIPE": "",
+        },
+        "SkinEquipped": {},
+        "BaseStatModifiers": {},
+        "State": "DEFAULT",
+    }
+
+    host_avatar = host_comps.get("AvatarComponent")
+    avatar = _follower_avatar(host_avatar)
+    adventure, venue = _follower_placement(
+        host_comps, _occupied_tiles(entities, exclude_guids=(host_player_guid,))
+    )
+
+    entity: dict[str, Any] = {
+        "Guid": new_guid,
+        "Components": {
+            "CharacterComponent": character_component,
+            "AIComponent": {},
+            "AvatarComponent": avatar,
+            "AdventureComponent": adventure,
+            "VenueComponent": venue,
+        },
+    }
+    entities.append(entity)
+
+    followers = run.get("PlayerFollowers")
+    if not isinstance(followers, dict):
+        followers = {}
+        run["PlayerFollowers"] = followers
+    followers[host_player_guid] = {
+        "FollowerID": new_guid,
+        "RoundsToExpire": int(spec.get("contract_rounds") or 0),
+    }
+
+    new_body = _dump_json_matching_newlines(run, body_text)
+    new_plain = f"//**{summary_text}**//{joiner}{new_body}"
+    return encrypt_ftk2_text(new_plain), True, new_guid
+
+
+# The Dark Carnival's "Evil Reflection": a bound COMPANION that mirrors its
+# host.  Marked by TypeArgs COMPANION_REFLECTION and Properties
+# ["EVIL", "REFLECTION"], carrying the *host's own* class config.
+REFLECTION_TYPE_ARGS = "COMPANION_REFLECTION"
+# The in-run wallet counter (viewmodel defines the same constant for display).
+_WALLET_CONFIG = "CURRENCY_ADVENTURE"
+REFLECTION_PROPERTIES = ["EVIL", "REFLECTION"]
+# Real reflections are bound with RoundsToExpire -1 (permanent), unlike a
+# contract follower which counts down.
+REFLECTION_ROUNDS_TO_EXPIRE = -1
+
+
+def add_evil_reflection(
+    data: bytes,
+    host_player_guid: str,
+    *,
+    replace: bool = False,
+    copy_inventory: bool = True,
+    health_ratio: float = 0.75,
+    focus_cap: int | None = 3,
+) -> tuple[bytes, bool, str]:
+    """Create a Dark Carnival Evil Reflection of *host_player_guid*.
+
+    A reflection is a bound ``COMPANION`` that mirrors its host: the host's own
+    class ``ConfigName``, ``TypeArgs`` ``COMPANION_REFLECTION``,
+    ``Properties`` ``["EVIL", "REFLECTION"]``, ``DisplayName`` "Evil <host>",
+    the host's health/focus, and its own map placement on a free tile beside
+    the host (see ``_follower_placement``).  A real one carries a full class
+    loadout, which is what *copy_inventory* reproduces by cloning the host's
+    ``Things`` with fresh ``Id``s.
+
+    The wallet and XP stacks are never cloned: ``CURRENCY_*`` and ``XP`` are
+    per-character counters, and copying them would duplicate the host's gold
+    and XP into a second body.  They are recreated empty instead, so the game
+    still has the counters it expects.
+
+    Three details are taken from the reflections in a real save rather than
+    from the host, because copying the host's would be wrong:
+
+    * ``Equipped`` is remapped onto the cloned stacks' new ``Id``s.  The game
+      resolves a slot by thing id, so a copied map would leave every equipped
+      slot dangling at gear the reflection does not have; the real ones have no
+      dangling slot.  A slot whose item was not mirrored is emptied.
+    * ``BaseStatModifiers`` and ``SkinEquipped`` are reset to ``{}`` — the
+      real reflections carry no stat or skin overrides even when the host has
+      some.
+    * the reflection is *weaker* than its host: both reference reflections sit
+      at 72-75% of the host's health with focus 3, so *health_ratio* scales
+      health and *focus_cap* caps focus (pass ``None`` to keep the host's).
+
+    Fail-closed: returns ``(data, False, "")`` on non-GameRun data, invalid
+    structure, an unknown/non-player/duplicated host, or a host that already
+    has a follower and *replace* unset.
+    """
+    if not host_player_guid:
+        return data, False, ""
+    plain = decrypt_ftk2_bytes(data)
+    parts = _split_gamerun_plain(plain)
+    if parts is None:
+        return data, False, ""
+    summary_text, body_text, joiner = parts
+    try:
+        run = json.loads(body_text)
+    except json.JSONDecodeError:
+        return data, False, ""
+    if not isinstance(run, dict):
+        return data, False, ""
+
+    entities = run.get("Entities")
+    if not isinstance(entities, list):
+        return data, False, ""
+    for e in entities:
+        if not isinstance(e, dict):
+            return data, False, ""
+
+    hosts = [e for e in entities if e.get("Guid") == host_player_guid]
+    if len(hosts) != 1:
+        return data, False, ""
+    host = hosts[0]
+    host_comps = host.get("Components")
+    if not isinstance(host_comps, dict) or not isinstance(
+        host_comps.get("PlayerComponent"), dict
+    ):
+        return data, False, ""
+    host_cc = host_comps.get("CharacterComponent")
+    if not isinstance(host_cc, dict) or not host_cc.get("ConfigName"):
+        return data, False, ""
+    if _follower_slot_taken(run, host_player_guid) and not replace:
+        return data, False, ""
+
+    host_name = str(host_cc.get("DisplayName") or "").strip()
+    config = str(host_cc.get("ConfigName") or "")
+
+    things: list[dict[str, Any]] = []
+    id_map: dict[str, str] = {}
+    if copy_inventory:
+        for thing in host_cc.get("Things") or []:
+            if not isinstance(thing, dict):
+                continue
+            name = str(thing.get("ConfigName") or "").upper()
+            if name.startswith("CURRENCY_") or name == "XP":
+                continue  # per-character counters, never mirrored
+            clone = copy.deepcopy(thing)
+            old_id = thing.get("Id")
+            clone["Id"] = str(uuid.uuid4())
+            if isinstance(old_id, str) and old_id:
+                id_map[old_id] = clone["Id"]
+            things.append(clone)
+    # Fresh empty counters: the game reads these, and mirroring the host's
+    # values would hand out a second wallet's worth of gold and XP.
+    things.append(
+        {
+            "Id": str(uuid.uuid4()),
+            "ConfigName": "XP",
+            "Type": "PASSIVE",
+            "_stackCount": 0,
+            "Expansion": "BASE",
+        }
+    )
+    things.append(
+        {
+            "Id": str(uuid.uuid4()),
+            "ConfigName": _WALLET_CONFIG,
+            "Type": "ITEM",
+            "_stackCount": 0,
+            "Expansion": "BASE",
+        }
+    )
+
+    character_component: dict[str, Any] = copy.deepcopy(host_cc)
+    character_component["DisplayName"] = (
+        f"Evil {host_name}" if host_name else f"Evil {config}"
+    )
+    character_component["TypeArgs"] = REFLECTION_TYPE_ARGS
+    character_component["CharacterType"] = "COMPANION"
+    character_component["Properties"] = list(REFLECTION_PROPERTIES)
+    character_component["Things"] = things
+    # Point every slot at the mirrored copy of the same item, and empty the
+    # slots whose item was not mirrored: a slot id the entity does not own is
+    # exactly what the real reflections never have.
+    equipped = host_cc.get("Equipped")
+    if isinstance(equipped, dict):
+        character_component["Equipped"] = {
+            slot: id_map.get(str(thing_id) or "", "")
+            for slot, thing_id in equipped.items()
+        }
+    character_component["BaseStatModifiers"] = {}
+    character_component["SkinEquipped"] = {}
+    # A reflection is weaker than the hero it mirrors.
+    try:
+        host_health = int(host_cc.get("CurrentHealth") or 0)
+    except (TypeError, ValueError):
+        host_health = 0
+    if host_health > 0 and health_ratio > 0:
+        character_component["CurrentHealth"] = max(1, int(host_health * health_ratio))
+    if focus_cap is not None:
+        try:
+            host_focus = int(host_cc.get("CurrentFocus") or 0)
+        except (TypeError, ValueError):
+            host_focus = 0
+        character_component["CurrentFocus"] = min(host_focus, int(focus_cap))
+    # A reflection is not a player: drop anything player-shaped.
+    character_component.pop("IsPlayer", None)
+
+    avatar = _follower_avatar(host_comps.get("AvatarComponent"))
+    adventure, venue = _follower_placement(
+        host_comps, _occupied_tiles(entities, exclude_guids=(host_player_guid,))
+    )
+
+    new_guid = str(uuid.uuid4())
+    entities.append(
+        {
+            "Guid": new_guid,
+            "Components": {
+                "CharacterComponent": character_component,
+                "AIComponent": {},
+                "AvatarComponent": avatar,
+                "AdventureComponent": adventure,
+                "VenueComponent": venue,
+            },
+        }
+    )
+
+    followers = run.get("PlayerFollowers")
+    if not isinstance(followers, dict):
+        followers = {}
+        run["PlayerFollowers"] = followers
+    followers[host_player_guid] = {
+        "FollowerID": new_guid,
+        "RoundsToExpire": REFLECTION_ROUNDS_TO_EXPIRE,
+    }
+
+    new_body = _dump_json_matching_newlines(run, body_text)
+    new_plain = f"//**{summary_text}**//{joiner}{new_body}"
+    return encrypt_ftk2_text(new_plain), True, new_guid
+
+
+def remove_follower(data: bytes, follower_guid: str) -> tuple[bytes, bool]:
+    """Remove a mercenary/companion follower entity from a run.
+
+    Deletes the entity and every ``PlayerFollowers`` entry whose ``FollowerID``
+    points at it, so the party slot is freed and a different follower can be
+    added.  A real save references a follower in exactly those two places (the
+    entity itself and the host's ``PlayerFollowers`` entry).
+
+    Fail-closed: returns ``(data, False)`` on non-GameRun data, invalid
+    structure, a missing/duplicate GUID, or a character that is not a removable
+    follower (a player-controlled entity, or one that is neither typed
+    ``MERCENARY``/``COMPANION`` nor bound in ``PlayerFollowers``).  The one
+    exception is a *dangling* binding -- a ``PlayerFollowers`` entry pointing
+    at a GUID with no entity -- which is cleared on its own so the slot can be
+    reused instead of being stuck forever.
+    """
+    if not follower_guid:
+        return data, False
+    plain = decrypt_ftk2_bytes(data)
+    parts = _split_gamerun_plain(plain)
+    if parts is None:
+        return data, False
+    summary_text, body_text, joiner = parts
+    try:
+        run = json.loads(body_text)
+    except json.JSONDecodeError:
+        return data, False
+    if not isinstance(run, dict):
+        return data, False
+
+    entities = run.get("Entities")
+    if not isinstance(entities, list) or not all(
+        isinstance(e, dict) for e in entities
+    ):
+        return data, False
+
+    followers = run.get("PlayerFollowers")
+    hosts: list[str] = []
+    if isinstance(followers, dict):
+        hosts = [
+            host
+            for host, state in followers.items()
+            if isinstance(state, dict) and state.get("FollowerID") == follower_guid
+        ]
+
+    matches = [e for e in entities if e.get("Guid") == follower_guid]
+    if not matches and hosts:
+        # Dangling binding: the follower entity is already gone (a save edited
+        # by hand, or one the game pruned).  Drop the host's reference so the
+        # slot becomes recruitable again instead of failing closed forever.
+        for host in hosts:
+            del followers[host]  # type: ignore[index]
+        new_body = _dump_json_matching_newlines(run, body_text)
+        new_plain = f"//**{summary_text}**//{joiner}{new_body}"
+        return encrypt_ftk2_text(new_plain), True
+    if len(matches) != 1:
+        return data, False
+    entity = matches[0]
+    comps = entity.get("Components")
+    if not isinstance(comps, dict):
+        return data, False
+    cc = comps.get("CharacterComponent")
+    if not isinstance(cc, dict):
+        return data, False
+    if isinstance(comps.get("PlayerComponent"), dict):
+        return data, False
+
+    if cc.get("CharacterType") not in ("MERCENARY", "COMPANION") and not hosts:
+        return data, False
+
+    entities.remove(entity)
+    if isinstance(followers, dict):
+        for host in hosts:
+            del followers[host]
+
+    new_body = _dump_json_matching_newlines(run, body_text)
+    new_plain = f"//**{summary_text}**//{joiner}{new_body}"
+    return encrypt_ftk2_text(new_plain), True
+
+
+def repair_follower_placement(data: bytes) -> tuple[bytes, bool, list[str]]:
+    """Give every placement-less bound follower its host's map position.
+
+    A follower entity with no ``AdventureComponent``/``VenueComponent`` is
+    bound in ``PlayerFollowers`` and alive, but the game never places it, so
+    it does not appear on screen.  Older versions of this editor wrote pet
+    entities that way (the shape of an *unbound* recruit template, which the
+    game also stores unplaced in ``Entities``), so a save edited by them can
+    hold an invisible pet.  This back-fills the pair from the bound host, the
+    same way ``add_pet``/``add_mercenary`` do now.
+
+    Returns ``(data, True, repaired_guids)``; the guid list is empty when
+    nothing needed fixing (the data comes back re-serialised either way, so
+    compare the list rather than the bytes).  Fail-closed: returns
+    ``(data, False, [])`` on non-GameRun data or invalid structure.  Followers
+    that already carry placement are left untouched, so this is safe to run on
+    a healthy save.
+    """
+    plain = decrypt_ftk2_bytes(data)
+    parts = _split_gamerun_plain(plain)
+    if parts is None:
+        return data, False, []
+    summary_text, body_text, joiner = parts
+    try:
+        run = json.loads(body_text)
+    except json.JSONDecodeError:
+        return data, False, []
+    if not isinstance(run, dict):
+        return data, False, []
+
+    entities = run.get("Entities")
+    followers = run.get("PlayerFollowers")
+    if not isinstance(entities, list) or not all(
+        isinstance(e, dict) for e in entities
+    ):
+        return data, False, []
+    if not isinstance(followers, dict):
+        return data, False, []
+
+    by_guid: dict[str, dict[str, Any]] = {}
+    for e in entities:
+        guid = e.get("Guid")
+        if isinstance(guid, str) and guid and guid not in by_guid:
+            by_guid[guid] = e
+
+    repaired: list[str] = []
+    for host_guid, state in followers.items():
+        if not isinstance(state, dict):
+            continue
+        follower_guid = state.get("FollowerID")
+        host = by_guid.get(host_guid)
+        follower = by_guid.get(str(follower_guid or ""))
+        if host is None or follower is None or follower is host:
+            continue
+        comps = follower.get("Components")
+        host_comps = host.get("Components")
+        if not isinstance(comps, dict) or not isinstance(host_comps, dict):
+            continue
+        if "AdventureComponent" in comps and "VenueComponent" in comps:
+            continue
+        adventure, venue = _follower_placement(
+            host_comps,
+            _occupied_tiles(entities, exclude_guids=(host_guid, follower["Guid"])),
+        )
+        comps["AdventureComponent"] = adventure
+        comps["VenueComponent"] = venue
+        repaired.append(follower["Guid"])
+
+    if not repaired:
+        return data, True, []
+
+    new_body = _dump_json_matching_newlines(run, body_text)
+    new_plain = f"//**{summary_text}**//{joiner}{new_body}"
+    return encrypt_ftk2_text(new_plain), True, repaired
 
 
 def backup(path: Path | str) -> Path:
