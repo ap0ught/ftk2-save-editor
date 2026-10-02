@@ -29,18 +29,26 @@ Tooling (also under `.tools/`, gitignored):
 
 1. Portable **.NET 8 SDK**
 2. **ilspycmd** 9.1 (net8) from NuGet
-3. Decompile save-related types with the Managed folder as references:
+3. Decompile save-related types with the Managed folder as references
+
+Invoke `ilspycmd` through the local SDK rather than via `.tools/bin/ilspycmd`:
+that wrapper still holds an absolute path from before the repo moved, so it
+fails with `No such file or directory`. The working form:
 
 ```bash
 export DOTNET_ROOT="$PWD/.tools/dotnet"
-export PATH="$DOTNET_ROOT:$PWD/.tools/bin:$PATH"
+ILSPY=("$PWD/.tools/dotnet/dotnet" exec "$PWD/.tools/nupkgs/extract-good/tools/net8.0/any/ilspycmd.dll")
 
 MANAGED="$HOME/.local/share/Steam/steamapps/common/For The King II/For The King II_Data/Managed"
 
-ilspycmd "$MANAGED/FTK2.dll" -t SaveGameHelper -r "$MANAGED" > decompiled/SaveGameHelper.cs
-ilspycmd "$MANAGED/FTK2.dll" -t UserData       -r "$MANAGED" > decompiled/UserData.cs
-ilspycmd "$MANAGED/FTK2.dll" -t GameRunData    -r "$MANAGED" > decompiled/GameRunData.cs
+"${ILSPY[@]}" "$MANAGED/FTK2.dll" -t SaveGameHelper -r "$MANAGED" > decompiled/SaveGameHelper.cs
+"${ILSPY[@]}" "$MANAGED/FTK2.dll" -t UserData       -r "$MANAGED" > decompiled/UserData.cs
+"${ILSPY[@]}" "$MANAGED/FTK2.dll" -t GameRunData    -r "$MANAGED" > decompiled/GameRunData.cs
 ```
+
+`FileIO` is not in `FTK2.dll` — it lives in `PlayEveryWare.dll` in the same
+`Managed/` folder, which is why `SaveGameHelper.cs` references a type that is
+not in the assembly it came from.
 
 `strings` / `monodis` on `FTK2.dll` already pointed at:
 
@@ -65,11 +73,16 @@ private static char _encryptOrDecryptChar(char pChar, int pIndex)
 Write path for `.ftk2`:
 
 1. `JsonHelper.Serialize*` → indented **System.Text.Json**
-2. XOR each **Unicode character** with repeating key `21398xa2`
+2. XOR each **UTF-16 code unit** with repeating key `21398xa2`
 3. Write UTF-8 text (typically with BOM)
 
-Decrypt is the same XOR (symmetric). Indices are character indices after UTF-8
-decode, not raw file-byte indices.
+Decrypt is the same XOR (symmetric). Indices are UTF-16 **code unit** indices
+after UTF-8 decode — not raw file-byte indices, and **not Unicode scalar (code
+point) indices**. `StreamReader.Read()` returns one code unit per call, so an
+astral character (emoji) consumes **two** key positions. Getting this wrong
+desynchronises the key at the first non-BMP character and silently corrupts
+everything after it; see [`FORMAT.md`](FORMAT.md) for the failure and the
+empirical evidence.
 
 `protobuf-net.dll` is in Managed but is **not** the on-disk save codec (likely
 networking / other systems). Saves are **JSON + XOR**.
@@ -116,8 +129,8 @@ PySide6 was chosen because system `tk` / `libtk` was not installed on this host.
 ## Reproducing decompilation later
 
 ```bash
-# After installing .tools as above
-ilspycmd "$MANAGED/FTK2.dll" -t SaveGameHelper -r "$MANAGED" | rg -n "encryptString|_encryptOrDecrypt"
+# After installing .tools as above, with ILSPY set as in Step 2
+"${ILSPY[@]}" "$MANAGED/FTK2.dll" -t SaveGameHelper -r "$MANAGED" | rg -n "encryptString|_encryptOrDecrypt"
 ```
 
 If IronOak changes the key or codec, re-decompile `SaveGameHelper` and update
