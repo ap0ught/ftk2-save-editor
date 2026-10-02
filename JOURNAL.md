@@ -22,8 +22,16 @@ Branch `fix/follower-placement-and-party-tools`, HEAD `c06f204`
 **Nothing from the 2026-10-01 repair session was committed.** As of this entry
 the working tree carried 6 modified files (+354/-30) — the entire save-corruption
 fix, uncommitted and on a feature branch that is not `main`. Committing it is
-the first thing to do in any future session; the diff is one `rm` from gone. This
-entry adds `JOURNAL.md`, `HANDOVER.md`, and two `decompiled/*.md` corrections.
+the first thing to do in any future session; the diff is one `rm` from gone.
+
+Commit `685c120` (this entry, pushed) took only the three files that were wholly
+new or wholly mine to change: `JOURNAL.md`, `HANDOVER.md`, and
+`decompiled/HOWTO.md`. Three further corrections of mine —
+`README.md:88-95` (`--verify-only` is shallow), `decompiled/FORMAT.md:172-176`
+(the `ilspycmd` path and `PlayEveryWare.dll`), and the module docstring at
+`src/ftk2_editor/__init__.py:4` — sit in files the repair session also edited,
+so they are **still unstaged**. Committing those three files now would carry the
+whole repair fix with them.
 
 ```
 $ .venv/bin/python -m pytest -q

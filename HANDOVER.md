@@ -66,6 +66,13 @@ The `.bak` … `.bak.14` chain in the live `GameRuns/` dir is intact and should 
 that way. `.bak.7` (22:34:02, 5796694 bytes, 6520 entities) is the
 furthest-progressed game-loadable state.
 
+Commit the fix before starting anything above. Note that three documentation
+corrections (`README.md` `--verify-only` caveat, `decompiled/FORMAT.md` ilspycmd
+path, `src/ftk2_editor/__init__.py` module docstring) are currently unstaged
+*because* the repair session also edited those three files. They should go in
+with the fix, not in a separate commit that would separate docs from the code
+they describe.
+
 Pre-repair originals, including both corrupted files:
 `~/code/games/ftk2/repair-backup-2026-10-01/`.
 
